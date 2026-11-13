@@ -215,6 +215,17 @@ impl ViewerApp {
                         self.toast.as_ref().map(|t| t.0.clone()),
                     );
                 }
+                Some("cloud") => {
+                    eprintln!(
+                        "automate: cloud ready={} enabled={} busy={} listed={} files={} status={:?}",
+                        self.cloud_cfg.ready(),
+                        self.cloud_enabled,
+                        self.cloud_busy,
+                        self.cloud_listed,
+                        self.cloud_files.len(),
+                        self.cloud_status,
+                    );
+                }
                 Some("dt") => {
                     eprintln!(
                         "automate: frame dt={:.3}s stable_dt={:.3}s",
