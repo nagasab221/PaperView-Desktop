@@ -128,7 +128,7 @@ fn load_png(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
     match info.color_type {
         png::ColorType::Rgba => Some((w, h, buf)),
         png::ColorType::Rgb => {
-            let rgba = buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+            let rgba = buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
             Some((w, h, rgba))
         }
         _ => None,
