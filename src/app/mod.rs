@@ -17,6 +17,7 @@ use crate::ui::widgets as w;
 #[cfg(debug_assertions)]
 mod automate;
 mod chrome;
+mod density;
 mod folders;
 mod library;
 mod peek;
@@ -459,6 +460,11 @@ pub struct ViewerApp {
     folders: Vec<PathBuf>,
     folder_listings: Vec<folders::Listing>,
     folders_scanned: Option<Instant>,
+    /// Interface size (egui zoom) and the value the slider is showing.
+    ui_scale: f32,
+    ui_scale_draft: f32,
+    library_layout: density::LibraryLayout,
+    preview: Option<density::Preview>,
     /// The sidebar's last open mode, shown while it slides shut.
     sidebar_last: SidebarMode,
     /// A transient message, bottom centre.
@@ -566,6 +572,10 @@ impl ViewerApp {
             folder_listings: Vec::new(),
             folders_scanned: None,
             sidebar_last: SidebarMode::Thumbs,
+            ui_scale: 1.0,
+            ui_scale_draft: 1.0,
+            library_layout: density::LibraryLayout::Covers,
+            preview: None,
             toast: None,
             #[cfg(debug_assertions)]
             announced_first_frame: false,
@@ -604,6 +614,14 @@ impl ViewerApp {
             if let Some(raw) = storage.get_string("peek_spots") {
                 app.peek.spots = peek::decode_spots(&raw);
             }
+            app.ui_scale = storage
+                .get_string("ui_scale")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(1.0)
+                .clamp(density::SCALE_MIN, density::SCALE_MAX);
+            app.ui_scale_draft = app.ui_scale;
+            app.library_layout =
+                density::LibraryLayout::from_key(&storage.get_string("library_layout").unwrap_or_default());
             if let Some(raw) = storage.get_string("folders") {
                 app.folders = folders::decode(&raw);
             }
@@ -2439,6 +2457,10 @@ impl eframe::App for ViewerApp {
             ui.set_style(ctx.global_style());
         }
         self.covers.pump(&ctx);
+        // Interface size: egui scales everything, and pages re-render sharp.
+        if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {
+            ctx.set_zoom_factor(self.ui_scale);
+        }
 
         // Defer showing the window until the second frame.  On frame 1 the
         // content is painted into the backbuffer but hasn't been swapped to
@@ -2628,6 +2650,8 @@ impl eframe::App for ViewerApp {
         storage.set_string("peek_spots", peek::encode_spots(&self.peek.spots));
         storage.set_string("peek_tips", self.peek.tips_shown.to_string());
         storage.set_string("folders", folders::encode(&self.folders));
+        storage.set_string("ui_scale", format!("{:.2}", self.ui_scale));
+        storage.set_string("library_layout", self.library_layout.key().to_string());
         storage.set_string("zoom", zoom_to_str(self.zoom));
         storage.set_string("recents", encode_recents(&self.recents));
         storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());

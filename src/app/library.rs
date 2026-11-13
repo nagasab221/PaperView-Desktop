@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
+use super::density::LibraryLayout;
 use super::{
     folders, fmt_speed, fmt_time, fmt_ts, open_file_location, CloudOp, HomeScreen, LandingTab,
     ViewerApp, FREE_TIER_BYTES,
@@ -16,9 +17,23 @@ use crate::ui::{theme, widgets as w};
 
 const TILE_W: f32 = 150.0;
 const TILE_GAP: f32 = 24.0;
+const SMALL_TILE_W: f32 = 110.0;
+const SMALL_TILE_GAP: f32 = 18.0;
 /// Cover aspect (width / height), as on the phone.
 const COVER_ASPECT: f32 = 0.77;
 const COLUMN_MAX: f32 = 1080.0;
+
+/// Texture coordinates that fill a frame of `aspect` (width / height) with
+/// a page, cropping from the top like the phone does.
+fn cover_uv(tex_size: [usize; 2], aspect: f32) -> egui::Rect {
+    let tex_aspect = tex_size[0] as f32 / tex_size[1].max(1) as f32;
+    if tex_aspect < aspect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, tex_aspect / aspect))
+    } else {
+        let f = aspect / tex_aspect;
+        egui::Rect::from_min_max(egui::pos2((1.0 - f) * 0.5, 0.0), egui::pos2((1.0 + f) * 0.5, 1.0))
+    }
+}
 
 /// One document on a shelf.
 struct Tile {
@@ -355,14 +370,22 @@ impl ViewerApp {
         ctx: &egui::Context,
         tiles: &[Tile],
     ) -> (Option<PathBuf>, Option<usize>) {
+        if self.library_layout == LibraryLayout::List {
+            return self.shelf_list(ui, ctx, tiles);
+        }
+        let (tile, gap) = if self.library_layout == LibraryLayout::SmallCovers {
+            (SMALL_TILE_W, SMALL_TILE_GAP)
+        } else {
+            (TILE_W, TILE_GAP)
+        };
         let width = ui.available_width();
-        let cols = (((width + TILE_GAP) / (TILE_W + TILE_GAP)).floor() as usize).max(1);
-        let tile_w = ((width - TILE_GAP * (cols as f32 - 1.0)) / cols as f32).min(TILE_W + 30.0);
+        let cols = (((width + gap) / (tile + gap)).floor() as usize).max(1);
+        let tile_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).min(tile + 30.0);
         let mut open_req = None;
         let mut remove_req = None;
         for (row, chunk) in tiles.chunks(cols).enumerate() {
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = TILE_GAP;
+                ui.spacing_mut().item_spacing.x = gap;
                 for (k, tile) in chunk.iter().enumerate() {
                     let (open, remove) = self.cover_tile(ui, ctx, tile, tile_w);
                     if open {
@@ -375,6 +398,57 @@ impl ViewerApp {
             });
             ui.add_space(18.0);
         }
+        (open_req, remove_req)
+    }
+
+    /// The shelf as a compact list: a small cover, the title, the line about it.
+    fn shelf_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        tiles: &[Tile],
+    ) -> (Option<PathBuf>, Option<usize>) {
+        let p = w::pal(ui);
+        let mut open_req = None;
+        let mut remove_req = None;
+        for (i, tile) in tiles.iter().enumerate() {
+            let path = tile.path.as_path();
+            let exists = path.exists();
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let meta = if exists { tile.meta.clone() } else { "File moved or deleted".to_string() };
+            let (resp, thumb) = w::row_lead(ui, exists, egui::vec2(31.0, 40.0), &name, Some(&meta), |_| {});
+            // A small first page in the row's leading space.
+            if ui.is_rect_visible(thumb) {
+                ui.painter().rect_filled(thumb, 0, p.surface);
+                if let Some(Cover::Ready(tex)) = exists.then(|| self.covers.get(ctx, path)).flatten() {
+                    let uv = cover_uv(tex.size(), thumb.width() / thumb.height());
+                    ui.painter().image(tex.id(), thumb, uv, egui::Color32::WHITE);
+                }
+                ui.painter().rect_stroke(thumb, 0, Stroke::new(1.0, p.hairline), egui::StrokeKind::Outside);
+            }
+            if resp.clicked() {
+                open_req = Some(tile.path.clone());
+            }
+            resp.on_hover_text(path.display().to_string()).context_menu(|ui| {
+                if exists && ui.button("Open").clicked() {
+                    open_req = Some(tile.path.clone());
+                    ui.close();
+                }
+                if ui.button("Show in folder").clicked() {
+                    open_file_location(path);
+                    ui.close();
+                }
+                if tile.removable && ui.button("Remove from library").clicked() {
+                    remove_req = Some(i);
+                    ui.close();
+                }
+            });
+            w::hairline(ui);
+        }
+        ui.add_space(12.0);
         (open_req, remove_req)
     }
 
@@ -420,21 +494,7 @@ impl ViewerApp {
                 // Only tiles on screen ask for their cover.
                 match exists.then(|| self.covers.get(ctx, path)).flatten() {
                     Some(Cover::Ready(tex)) => {
-                        // Fill the tile, cropping from the top like the phone does.
-                        let [tw, th] = tex.size().map(|v| v as f32);
-                        let tex_aspect = tw / th.max(1.0);
-                        let uv = if tex_aspect < COVER_ASPECT {
-                            egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, tex_aspect / COVER_ASPECT),
-                            )
-                        } else {
-                            let f = COVER_ASPECT / tex_aspect;
-                            egui::Rect::from_min_max(
-                                egui::pos2((1.0 - f) * 0.5, 0.0),
-                                egui::pos2((1.0 + f) * 0.5, 1.0),
-                            )
-                        };
+                        let uv = cover_uv(tex.size(), COVER_ASPECT);
                         painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
                     }
                     _ => {

@@ -288,7 +288,38 @@ pub fn row(
     subtitle: Option<&str>,
     trailing: impl FnOnce(&mut Ui),
 ) -> Response {
+    row_impl(ui, clickable, glyph.map(Lead::Glyph).unwrap_or(Lead::None), title, subtitle, trailing).0
+}
+
+/// A row with an empty leading area of `lead` size (for a thumbnail, say);
+/// returns the row and where that area is.
+pub fn row_lead(
+    ui: &mut Ui,
+    clickable: bool,
+    lead: Vec2,
+    title: &str,
+    subtitle: Option<&str>,
+    trailing: impl FnOnce(&mut Ui),
+) -> (Response, egui::Rect) {
+    row_impl(ui, clickable, Lead::Space(lead), title, subtitle, trailing)
+}
+
+enum Lead<'a> {
+    None,
+    Glyph(&'a str),
+    Space(Vec2),
+}
+
+fn row_impl(
+    ui: &mut Ui,
+    clickable: bool,
+    lead: Lead<'_>,
+    title: &str,
+    subtitle: Option<&str>,
+    trailing: impl FnOnce(&mut Ui),
+) -> (Response, egui::Rect) {
     let p = pal(ui);
+    let mut lead_rect = egui::Rect::NOTHING;
     let width = ui.available_width();
     // A slot under the content for the hover wash, painted behind the text.
     let wash = ui.painter().add(egui::Shape::Noop);
@@ -301,12 +332,19 @@ pub fn row(
             ui.set_width(width);
             ui.set_min_height(48.0);
             ui.add_space(4.0);
-            if let Some(g) = glyph {
-                ui.add_sized(
-                    [24.0, 24.0],
-                    egui::Label::new(RichText::new(g).size(17.0).color(p.muted)).selectable(false),
-                );
-                ui.add_space(6.0);
+            match lead {
+                Lead::None => {}
+                Lead::Glyph(g) => {
+                    ui.add_sized(
+                        [24.0, 24.0],
+                        egui::Label::new(RichText::new(g).size(17.0).color(p.muted)).selectable(false),
+                    );
+                    ui.add_space(6.0);
+                }
+                Lead::Space(size) => {
+                    lead_rect = ui.allocate_exact_size(size, Sense::hover()).0;
+                    ui.add_space(10.0);
+                }
             }
             ui.vertical(|ui| {
                 ui.add_space(7.0);
@@ -338,7 +376,7 @@ pub fn row(
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
     }
-    resp
+    (resp, lead_rect)
 }
 
 /// A square checkbox in the accent colour; the tick fades in.

@@ -34,8 +34,10 @@ There's an eye button next to the page number that does the same with the mouse:
 ### ☁ Your own cloud (optional)
 Keep documents in your own **Backblaze B2** bucket. It's the same bucket as the phone app, so a PDF saved on one shows up on the other. A **Cloud** tab appears in the Library once it's set up, and nothing uploads unless you ask.
 
-### 🎨 Looks like the phone app
-Three styles (**Paper**, **Slate** and **Ink**), each in light and dark, or following your system.
+### 🎨 Looks like the phone app, sized how you like
+- Three styles (**Paper**, **Slate** and **Ink**), each in light and dark, or following your system.
+- A **Size** slider in Settings makes everything more compact or easier to read. While you drag it, a small preview shows the result before anything changes.
+- Show the Library as **large covers**, **small covers** or a compact **list**.
 
 ---
 

@@ -233,6 +233,14 @@ impl ViewerApp {
                     });
                     eprintln!("automate: window maximized={max:?} minimized={min:?} inner={rect:?}");
                 }
+                Some("zoom") => {
+                    eprintln!(
+                        "automate: zoom applied={:.2} setting={:.2} slider={:.2}",
+                        ctx.zoom_factor(),
+                        self.ui_scale,
+                        self.ui_scale_draft
+                    );
+                }
                 Some("dt") => {
                     eprintln!(
                         "automate: frame dt={:.3}s stable_dt={:.3}s",

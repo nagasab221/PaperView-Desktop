@@ -42,6 +42,7 @@ impl ViewerApp {
                 }
             }
         });
+        self.density_settings(ui);
 
         // ── Backblaze B2 ─────────────────────────────────────────────────────
         w::section_heading(ui, "Backblaze B2", |_| {});
