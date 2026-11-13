@@ -79,10 +79,10 @@ impl ViewerApp {
         let pad = ((avail - col) * 0.5).max(24.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .id_salt(("home", self.home, self.landing_tab))
+            .id_salt(("home", self.home))
             .show(ui, |ui| {
-                // Switching screens or tabs fades the new one in.
-                w::fade_in(ui, (self.home, self.landing_tab));
+                // Library <-> Settings is a page change: fade the page.
+                w::fade_in(ui, "home", self.home);
                 ui.horizontal(|ui| {
                     ui.add_space(pad);
                     ui.vertical(|ui| {
@@ -178,11 +178,17 @@ impl ViewerApp {
             ui.add_space(10.0);
         }
 
-        match self.landing_tab {
-            LandingTab::Saved => self.cloud_page(ui, &ctx),
-            LandingTab::Folders => self.folders_page(ui, &ctx),
-            LandingTab::Recent => self.recents_shelf(ui, &ctx),
-        }
+        // Only what's under the tabs changes when they're switched; the
+        // heading and the tabs themselves stay put.
+        let tab = self.landing_tab;
+        ui.scope(|ui| {
+            w::fade_in(ui, "library-tab", tab);
+            match tab {
+                LandingTab::Saved => self.cloud_page(ui, &ctx),
+                LandingTab::Folders => self.folders_page(ui, &ctx),
+                LandingTab::Recent => self.recents_shelf(ui, &ctx),
+            }
+        });
     }
 
     // ── Recents ──────────────────────────────────────────────────────────────

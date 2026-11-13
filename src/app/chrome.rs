@@ -13,7 +13,7 @@ use super::{
 use crate::ui::{theme, widgets as w};
 
 const TOAST_FOR: Duration = Duration::from_millis(4500);
-const ACTIONS_W: f32 = 132.0;
+const ACTIONS_W: f32 = 90.0;
 /// Height of PaperView's own title bar, and the width of its window buttons.
 const TITLE_H: f32 = 34.0;
 const WIN_BTN_W: f32 = 44.0;
@@ -54,6 +54,21 @@ impl ViewerApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                 } else if drag.drag_started_by(egui::PointerButton::Primary) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // The app menu lives in the left corner, as in Telegram.
+                let corner = egui::Rect::from_min_size(
+                    bar.min + egui::vec2(6.0, 1.0),
+                    egui::vec2(40.0, TITLE_H - 2.0),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(corner)
+                        .layout(Layout::left_to_right(Align::Center)),
+                    |ui| self.overflow_menu(ui, &ctx),
+                );
+                if self.tabs.is_empty() {
+                    ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.hairline));
                 }
 
                 // Title, centred on the whole window rather than the free space.
@@ -174,6 +189,10 @@ impl ViewerApp {
     // ── top bar ──────────────────────────────────────────────────────────────
 
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
+        // With nothing open, a strip holding only "Library" is just noise.
+        if self.tabs.is_empty() {
+            return;
+        }
         let ctx = ui.ctx().clone();
         let p = w::pal(ui);
         egui::Panel::top("topbar")
@@ -195,7 +214,6 @@ impl ViewerApp {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
-                        self.overflow_menu(ui, &ctx);
                         if self.doc.is_some() {
                             if w::icon_button(ui, "🔍", "Find in document (Ctrl+F)", self.search_open)
                                 .clicked()

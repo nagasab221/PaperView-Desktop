@@ -494,25 +494,40 @@ pub fn modal(id: &str, ctx: &egui::Context) -> egui::Modal {
     )
 }
 
-/// Fades a freshly shown view in: call at the top of a view with a key that
-/// changes whenever the view does.
-pub fn fade_in(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug) {
-    let id = egui::Id::new(("fade-in", key));
+/// Fades a freshly shown view in: call at the top of the area that changes,
+/// with a `key` that changes whenever its content does. Each `slot` tracks
+/// its own area, so a page and a tab inside it can fade independently.
+/// Starts from a faint version of the new view rather than from nothing, so
+/// a switch reads as a soft change instead of a blink.
+pub fn fade_in(ui: &mut Ui, slot: &str, key: impl std::hash::Hash + std::fmt::Debug) {
+    let id = egui::Id::new(("fade-in", slot, key));
+    let current = egui::Id::new(("fade-in-current", slot));
     let now = ui.input(|i| i.time);
-    let started = ui.ctx().data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
-    // Forget other views' start times so coming back fades again.
-    let current = egui::Id::new("fade-in-current");
     let previous = ui.ctx().data(|d| d.get_temp::<egui::Id>(current));
-    if previous != Some(id) {
-        if let Some(prev) = previous {
-            ui.ctx().data_mut(|d| d.remove::<f64>(prev));
+    let started = match previous {
+        Some(prev) if prev == id => ui.ctx().data(|d| d.get_temp::<f64>(id)).unwrap_or(now - 1.0),
+        Some(prev) => {
+            // Switched: start this view's fade now.
+            ui.ctx().data_mut(|d| {
+                d.remove::<f64>(prev);
+                d.insert_temp(current, id);
+                d.insert_temp(id, now);
+            });
+            now
         }
-        ui.ctx().data_mut(|d| d.insert_temp(current, id));
-    }
-    let elapsed = (now - started) as f32;
-    let t = (elapsed / 0.18).clamp(0.0, 1.0);
+        None => {
+            // First view ever shown: no fade.
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(current, id);
+                d.insert_temp(id, now - 1.0);
+            });
+            now - 1.0
+        }
+    };
+    let t = (((now - started) as f32) / 0.16).clamp(0.0, 1.0);
     if t < 1.0 {
-        ui.multiply_opacity(t * (2.0 - t)); // ease-out
+        let eased = t * (2.0 - t);
+        ui.multiply_opacity(0.45 + 0.55 * eased);
         ui.ctx().request_repaint();
     }
 }
