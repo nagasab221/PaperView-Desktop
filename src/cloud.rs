@@ -52,6 +52,8 @@ pub enum CloudEvent {
     UploadDone { name: String, bytes: u64, secs: f64 },
     /// Terminal: files deleted.
     Deleted(usize),
+    /// Terminal: a file now goes by a new name.
+    Renamed { from: String, to: String },
 }
 
 pub enum CloudOp {
@@ -61,6 +63,9 @@ pub enum CloudOp {
     Download(String, u64, bool),
     /// (file name, file id) pairs to delete.
     Delete(Vec<(String, String)>),
+    /// (current name, file id, new name). B2 has no rename: the file is
+    /// copied server-side under the new name, then the old version deleted.
+    Rename(String, String, String),
 }
 
 /// Where downloaded PDFs live locally.
@@ -105,6 +110,10 @@ pub fn spawn(cfg: B2Config, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
             let _ = tx.send(e);
             repaint.request_repaint();
         };
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("PAPERVIEW_FAKE_CLOUD").filter(|d| !d.is_empty()) {
+            return fake::run(std::path::Path::new(&dir), op, &send);
+        }
         send(CloudEvent::Status("Connecting…".into()));
         let session = match connect(&cfg) {
             Ok(s) => s,
@@ -135,6 +144,13 @@ pub fn spawn(cfg: B2Config, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
                 send(CloudEvent::Status("Deleting…".into()));
                 match delete(&session, &items) {
                     Ok(n) => send(CloudEvent::Deleted(n)),
+                    Err(e) => send(CloudEvent::Error(e)),
+                }
+            }
+            CloudOp::Rename(from, id, to) => {
+                send(CloudEvent::Status(format!("Renaming to {to}…")));
+                match rename(&session, &from, &id, &to) {
+                    Ok(()) => send(CloudEvent::Renamed { from, to }),
                     Err(e) => send(CloudEvent::Error(e)),
                 }
             }
@@ -410,6 +426,28 @@ fn delete(s: &Session, items: &[(String, String)]) -> Result<usize, String> {
     Ok(items.len())
 }
 
+/// Copies a file to `to` on the server, then deletes the original version.
+fn rename(s: &Session, from: &str, id: &str, to: &str) -> Result<(), String> {
+    let body = serde_json::json!({
+        "sourceFileId": id,
+        "fileName": to,
+        "metadataDirective": "COPY",
+    });
+    agent()
+        .post(format!("{}/b2api/v2/b2_copy_file", s.api_url))
+        .header("Authorization", &s.token)
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .map_err(|e| http_err(&format!("Could not copy {from} to {to}"), e))?;
+    delete(s, &[(from.to_string(), id.to_string())])?;
+    // Keep a downloaded copy under its new name too.
+    let old_local = local_path_for(from);
+    if old_local.exists() {
+        let _ = std::fs::rename(&old_local, local_path_for(to));
+    }
+    Ok(())
+}
+
 /// (file count, total bytes) of the local download cache.
 pub fn cache_stats() -> (usize, u64) {
     let mut count = 0usize;
@@ -493,5 +531,66 @@ mod tests {
         let p = local_path_for("dir/sub\\file:x.pdf");
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(name, "dir_sub_file_x.pdf");
+    }
+}
+
+/// A folder standing in for the bucket, for UI tests (debug builds only,
+/// `PAPERVIEW_FAKE_CLOUD=<dir>`), so tests never touch a real bucket.
+#[cfg(debug_assertions)]
+mod fake {
+    use super::*;
+
+    pub fn run(dir: &Path, op: CloudOp, send: &dyn Fn(CloudEvent)) {
+        let _ = std::fs::create_dir_all(dir);
+        let list = || -> Vec<CloudFile> {
+            let mut files: Vec<CloudFile> = std::fs::read_dir(dir)
+                .map(|d| {
+                    d.flatten()
+                        .filter_map(|e| {
+                            let meta = e.metadata().ok()?;
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            Some(CloudFile {
+                                file_id: format!("id-{name}"),
+                                size: meta.len(),
+                                uploaded_ms: 1_763_000_000_000,
+                                name,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+            files
+        };
+        match op {
+            CloudOp::List => send(CloudEvent::Files(list())),
+            CloudOp::Upload(path) => {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let n = std::fs::copy(&path, dir.join(&name)).unwrap_or(0);
+                send(CloudEvent::UploadDone { name, bytes: n, secs: 0.1 })
+            }
+            CloudOp::Download(name, _, open) => {
+                let dest = local_path_for(&name);
+                let _ = std::fs::create_dir_all(cache_dir());
+                match std::fs::copy(dir.join(&name), &dest) {
+                    Ok(n) => send(CloudEvent::Downloaded { path: dest, bytes: n, secs: 0.1, open }),
+                    Err(e) => send(CloudEvent::Error(format!("fake download: {e}"))),
+                }
+            }
+            CloudOp::Delete(items) => {
+                for (name, _) in &items {
+                    let _ = std::fs::remove_file(dir.join(name));
+                }
+                send(CloudEvent::Deleted(items.len()))
+            }
+            CloudOp::Rename(from, _, to) => {
+                let _ = std::fs::rename(dir.join(&from), dir.join(&to));
+                let old_local = local_path_for(&from);
+                if old_local.exists() {
+                    let _ = std::fs::rename(&old_local, local_path_for(&to));
+                }
+                send(CloudEvent::Renamed { from, to })
+            }
+        }
     }
 }

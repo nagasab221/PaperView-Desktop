@@ -433,7 +433,8 @@ pub struct ViewerApp {
     /// Names selected in the Saved tab for batch actions.
     cloud_selected: HashSet<String>,
     /// Two-step delete confirmation deadline.
-    confirm_delete_until: Option<Instant>,
+    /// An open rename / delete confirmation on the Cloud page.
+    cloud_dialog: Option<library::CloudDialog>,
     /// View rotation for the whole document, quarter turns clockwise.
     rotation: u8,
     /// Recently closed tabs, most recent last: (path, password).
@@ -547,7 +548,7 @@ impl ViewerApp {
             cloud_cache: (0, 0),
             cloud_queue: VecDeque::new(),
             cloud_selected: HashSet::new(),
-            confirm_delete_until: None,
+            cloud_dialog: None,
             rotation: 0,
             closed_tabs: Vec::new(),
             skin: Skin::Paper,
@@ -1191,7 +1192,7 @@ impl ViewerApp {
 
         let mut do_print = false;
         let mut do_cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("print-preview")).show(ctx, |ui| {
+        let modal = w::modal("print-preview", ctx).show(ctx, |ui| {
             ui.label(egui::RichText::new("Print").text_style(theme::headline()));
             let paper_in = (dev_w as f32 / dpi as f32, dev_h as f32 / dpi as f32);
             ui.label(
@@ -1963,7 +1964,7 @@ impl ViewerApp {
         };
         let mut submit = false;
         let mut cancel = false;
-        egui::Modal::new(egui::Id::new("pdf-password")).show(ctx, |ui| {
+        w::modal("pdf-password", ctx).show(ctx, |ui| {
             ui.set_width(320.0);
             ui.label(egui::RichText::new("Password required").strong());
             let name = path
@@ -2529,10 +2530,30 @@ impl eframe::App for ViewerApp {
                     }
                     CloudEvent::Deleted(n) => {
                         self.cloud_busy = false;
-                        self.cloud_status =
-                            Some(format!("Deleted {n} file{}", if n == 1 { "" } else { "s" }));
+                        self.cloud_status = None;
+                        self.toast = Some((
+                            format!("Deleted {n} file{} from your bucket", if n == 1 { "" } else { "s" }),
+                            Instant::now(),
+                        ));
                         self.cloud_selected.clear();
                         relist = self.cloud_queue.is_empty();
+                        refresh_local = true;
+                    }
+                    CloudEvent::Renamed { from, to } => {
+                        self.cloud_busy = false;
+                        self.cloud_status = None;
+                        // A Recents entry for the downloaded copy follows it.
+                        let (old_local, new_local) =
+                            (cloud::local_path_for(&from), cloud::local_path_for(&to));
+                        for r in self.recents.iter_mut().filter(|r| r.path == old_local) {
+                            r.path = new_local.clone();
+                        }
+                        if let Some(spot) = self.peek.spots.remove(&old_local) {
+                            self.peek.spots.insert(new_local, spot);
+                        }
+                        self.toast = Some((format!("Renamed to {to}"), Instant::now()));
+                        relist = self.cloud_queue.is_empty();
+                        refresh_local = true;
                     }
                 }
             }
@@ -2569,6 +2590,9 @@ impl eframe::App for ViewerApp {
         self.handle_input(&ctx);
         self.password_modal(&ctx);
         self.print_preview_modal(&ctx);
+        self.cloud_dialogs(&ctx);
+        self.window_edges(&ctx);
+        self.title_bar(ui);
         self.top_bar(ui);
         if self.doc.is_some() {
             self.bottom_bar(ui);

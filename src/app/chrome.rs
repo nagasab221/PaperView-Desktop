@@ -14,6 +14,9 @@ use crate::ui::{theme, widgets as w};
 
 const TOAST_FOR: Duration = Duration::from_millis(4500);
 const ACTIONS_W: f32 = 132.0;
+/// Height of PaperView's own title bar, and the width of its window buttons.
+const TITLE_H: f32 = 34.0;
+const WIN_BTN_W: f32 = 44.0;
 /// Height of the bottom bar's row.
 const BAR_H: f32 = 42.0;
 
@@ -24,6 +27,148 @@ impl ViewerApp {
 
     pub(super) fn cloud_active(&self) -> bool {
         self.cloud_enabled && self.cloud_cfg.ready()
+    }
+
+    // ── title bar ────────────────────────────────────────────────────────────
+
+    /// PaperView draws its own title bar, in the app's colours: the open
+    /// document's name in the middle, window buttons on the right. Drag it to
+    /// move the window, double-click to maximise. The window edges resize.
+    pub(super) fn title_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let p = w::pal(ui);
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let title = self
+            .active_tab
+            .and_then(|i| self.tabs.get(i))
+            .map(|t| t.title.clone());
+        egui::Panel::top("titlebar")
+            .exact_size(TITLE_H)
+            .frame(egui::Frame::NONE.fill(p.background))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let bar = ui.max_rect();
+                // The whole bar drags the window; buttons drawn on top win.
+                let drag = ui.interact(bar, egui::Id::new("titlebar-drag"), Sense::click_and_drag());
+                if drag.double_clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                } else if drag.drag_started_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Title, centred on the whole window rather than the free space.
+                let (name, app) = match &title {
+                    Some(t) => (t.clone(), "  —  PaperView"),
+                    None => ("PaperView".to_string(), ""),
+                };
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    &name,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::new(13.5, theme::medium()),
+                        color: p.ink,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    app,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::new(13.5, egui::FontFamily::Proportional),
+                        color: p.muted,
+                        ..Default::default()
+                    },
+                );
+                let room = (bar.width() - 3.0 * WIN_BTN_W * 2.0 - 24.0).max(60.0);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let pos = bar.center() - galley.size() * 0.5;
+                ui.painter().galley(pos, galley, p.ink);
+
+                // Window buttons, right to left.
+                let mut x = bar.right();
+                for which in [WinBtn::Close, WinBtn::Maximize, WinBtn::Minimize] {
+                    x -= WIN_BTN_W;
+                    let rect = egui::Rect::from_min_size(egui::pos2(x, bar.top()), egui::vec2(WIN_BTN_W, TITLE_H));
+                    let resp = ui.interact(rect, egui::Id::new(("winbtn", which as u8)), Sense::click());
+                    let t = w::hover_t(ui, &resp, true);
+                    let close = which == WinBtn::Close;
+                    let red = egui::Color32::from_rgb(0xD9, 0x3B, 0x30);
+                    let fill = if close { red.gamma_multiply(t) } else { p.hover().gamma_multiply(t) };
+                    ui.painter().rect_filled(rect, 0, fill);
+                    let ink = if close { p.ink.lerp_to_gamma(egui::Color32::WHITE, t) } else { p.ink };
+                    let behind = p.background.lerp_to_gamma(p.hover(), t);
+                    paint_win_glyph(ui.painter(), rect.center(), which, maximized, ink, behind);
+                    if resp.clicked() {
+                        ctx.send_viewport_cmd(match which {
+                            WinBtn::Close => egui::ViewportCommand::Close,
+                            WinBtn::Maximize => egui::ViewportCommand::Maximized(!maximized),
+                            WinBtn::Minimize => egui::ViewportCommand::Minimized(true),
+                        });
+                    }
+                    resp.on_hover_text(match which {
+                        WinBtn::Close => "Close",
+                        WinBtn::Maximize if maximized => "Restore",
+                        WinBtn::Maximize => "Maximise",
+                        WinBtn::Minimize => "Minimise",
+                    });
+                }
+            });
+    }
+
+    /// Without the system frame, the edges have to resize the window themselves.
+    pub(super) fn window_edges(&mut self, ctx: &egui::Context) {
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if maximized || fullscreen {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let p = theme::palette(self.skin, self.theme.is_dark(ctx));
+        // A hairline frame, so the window has an edge on any wallpaper.
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window-edge")))
+            .rect_stroke(screen, 0, Stroke::new(1.0, p.hairline.lerp_to_gamma(p.muted, 0.35)), egui::StrokeKind::Inside);
+
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        const GRIP: f32 = 6.0;
+        const CORNER: f32 = 14.0;
+        let (l, r, t, b) = (
+            pos.x - screen.left() < GRIP,
+            screen.right() - pos.x < GRIP,
+            pos.y - screen.top() < GRIP,
+            screen.bottom() - pos.y < GRIP,
+        );
+        // Corners are a little more generous than the straight edges.
+        let near = |d: f32| d < CORNER;
+        let (cl, cr, ct, cb) = (
+            near(pos.x - screen.left()),
+            near(screen.right() - pos.x),
+            near(pos.y - screen.top()),
+            near(screen.bottom() - pos.y),
+        );
+        use egui::viewport::ResizeDirection as D;
+        let dir = match () {
+            _ if (t && cl) || (l && ct) => Some(D::NorthWest),
+            _ if (t && cr) || (r && ct) => Some(D::NorthEast),
+            _ if (b && cl) || (l && cb) => Some(D::SouthWest),
+            _ if (b && cr) || (r && cb) => Some(D::SouthEast),
+            _ if l => Some(D::West),
+            _ if r => Some(D::East),
+            _ if t => Some(D::North),
+            _ if b => Some(D::South),
+            _ => None,
+        };
+        let Some(dir) = dir else { return };
+        ctx.set_cursor_icon(match dir {
+            D::North | D::South => egui::CursorIcon::ResizeVertical,
+            D::East | D::West => egui::CursorIcon::ResizeHorizontal,
+            D::NorthWest | D::SouthEast => egui::CursorIcon::ResizeNwSe,
+            D::NorthEast | D::SouthWest => egui::CursorIcon::ResizeNeSw,
+        });
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
     }
 
     // ── top bar ──────────────────────────────────────────────────────────────
@@ -541,6 +686,51 @@ fn tab_item(
         }
     }
     (resp.clicked(), closed)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WinBtn {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// Window-button glyphs, drawn with lines so they're crisp at any scale.
+fn paint_win_glyph(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    which: WinBtn,
+    maximized: bool,
+    ink: egui::Color32,
+    behind: egui::Color32,
+) {
+    let s = Stroke::new(1.2, ink);
+    let h = 5.0;
+    match which {
+        WinBtn::Minimize => {
+            painter.hline(c.x - h..=c.x + h, c.y, s);
+        }
+        WinBtn::Maximize if maximized => {
+            // Restore: two overlapping squares.
+            let back = egui::Rect::from_center_size(c + egui::vec2(1.5, -1.5), egui::vec2(8.0, 8.0));
+            let front = egui::Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 8.0));
+            painter.rect_stroke(back, 1, s, egui::StrokeKind::Middle);
+            painter.rect_filled(front, 1, behind);
+            painter.rect_stroke(front, 1, s, egui::StrokeKind::Middle);
+        }
+        WinBtn::Maximize => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)),
+                1,
+                s,
+                egui::StrokeKind::Middle,
+            );
+        }
+        WinBtn::Close => {
+            painter.line_segment([c + egui::vec2(-h, -h), c + egui::vec2(h, h)], s);
+            painter.line_segment([c + egui::vec2(-h, h), c + egui::vec2(h, -h)], s);
+        }
+    }
 }
 
 /// A square glyph button for steppers (page, zoom).

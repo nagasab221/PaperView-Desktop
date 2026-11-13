@@ -54,6 +54,8 @@ pub enum Kind {
     Primary,
     /// Hairline outline: secondary actions.
     Outlined,
+    /// Solid red: an action that can't be undone.
+    Danger,
 }
 
 /// Everything a button can vary in, with sensible defaults.
@@ -120,6 +122,11 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>, b: Btn) -> Response {
             (Kind::Primary, true) => {
                 let lift = Palette::mix(p.accent, p.ink, 0.12);
                 (p.accent.lerp_to_gamma(lift, hover * 0.6 + press * 0.4), Stroke::NONE, p.on_accent)
+            }
+            (Kind::Danger, true) => {
+                let red = ui.visuals().error_fg_color;
+                let deep = Palette::mix(red, p.ink, 0.15);
+                (red.lerp_to_gamma(deep, hover * 0.6 + press * 0.4), Stroke::NONE, p.surface)
             }
             (Kind::Outlined, true) => (
                 p.hover().gamma_multiply(hover).lerp_to_gamma(p.pressed(), press),
@@ -270,6 +277,9 @@ pub fn field_label(ui: &mut Ui, text: &str) {
 
 /// A row: optional glyph, title, description, trailing content. A
 /// `clickable` row fades a wash in on hover and reports clicks.
+///
+/// The row's own click area is registered *before* its contents, so buttons
+/// inside it (a menu, a checkbox) get their clicks instead of the row.
 pub fn row(
     ui: &mut Ui,
     clickable: bool,
@@ -280,13 +290,15 @@ pub fn row(
 ) -> Response {
     let p = pal(ui);
     let width = ui.available_width();
-    // Reserve a slot under the content for the hover wash, so it is painted
-    // behind the text rather than over it.
+    // A slot under the content for the hover wash, painted behind the text.
     let wash = ui.painter().add(egui::Shape::Noop);
-    let inner = ui.allocate_ui_with_layout(
-        egui::vec2(width, 0.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
+    let builder = egui::UiBuilder::new()
+        .id_salt(("row", title))
+        .layout(Layout::left_to_right(Align::Center))
+        .sense(if clickable { Sense::click() } else { Sense::hover() });
+    let resp = ui
+        .scope_builder(builder, |ui| {
+            ui.set_width(width);
             ui.set_min_height(48.0);
             ui.add_space(4.0);
             if let Some(g) = glyph {
@@ -313,20 +325,51 @@ pub fn row(
                 ui.add_space(7.0);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), trailing);
-        },
-    );
-    let rect = inner.response.rect;
-    let sense = if clickable { Sense::click() } else { Sense::hover() };
-    let resp = ui.interact(rect, ui.id().with(("row", title)), sense);
+        })
+        .response;
     if clickable {
-        let t = hover_t(ui, &resp, true);
+        let hovering = resp.hovered() || resp.contains_pointer();
+        let t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), hovering, HOVER_FADE);
         if t > 0.0 {
             ui.painter()
-                .set(wash, egui::epaint::RectShape::filled(rect, 4, p.hover().gamma_multiply(t)));
+                .set(wash, egui::epaint::RectShape::filled(resp.rect, 4, p.hover().gamma_multiply(t)));
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
+    }
+    resp
+}
+
+/// A square checkbox in the accent colour; the tick fades in.
+pub fn check(ui: &mut Ui, checked: bool) -> Response {
+    let p = pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(resp.id, checked, 0.12);
+    let hover = hover_t(ui, &resp, true);
+    let r = egui::Rect::from_center_size(rect.center(), Vec2::splat(18.0));
+    let painter = ui.painter();
+    if hover > 0.0 {
+        painter.circle_filled(rect.center(), 15.0, p.hover().gamma_multiply(hover));
+    }
+    painter.rect(
+        r,
+        4,
+        Color32::TRANSPARENT.lerp_to_gamma(p.accent, t),
+        Stroke::new(1.5, p.muted.lerp_to_gamma(p.accent, t)),
+        StrokeKind::Inside,
+    );
+    if t > 0.0 {
+        // The tick, drawn rather than taken from a font.
+        let c = p.on_accent.gamma_multiply(t);
+        let a = r.left_top() + egui::vec2(4.0, 9.5);
+        let b = r.left_top() + egui::vec2(7.5, 13.0);
+        let d = r.left_top() + egui::vec2(14.0, 5.5);
+        painter.line_segment([a, b], Stroke::new(2.0, c));
+        painter.line_segment([b, d], Stroke::new(2.0, c));
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     resp
 }
@@ -435,6 +478,20 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str, action: Option<(&str, &
         }
     });
     ui.add_space(24.0);
+}
+
+/// A dialog in the house style: paper surface, hairline, generous margins.
+pub fn modal(id: &str, ctx: &egui::Context) -> egui::Modal {
+    let p = ctx
+        .data(|d| d.get_temp::<Palette>(egui::Id::new("paper-palette")))
+        .unwrap_or_else(|| theme::palette(theme::Skin::Paper, false));
+    egui::Modal::new(egui::Id::new(id)).frame(
+        egui::Frame::NONE
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.hairline))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::same(24)),
+    )
 }
 
 /// Fades a freshly shown view in: call at the top of a view with a key that

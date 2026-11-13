@@ -3,7 +3,6 @@
 //! tabs as the phone. The Cloud tab doesn't exist until the bucket does.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
@@ -550,92 +549,54 @@ impl ViewerApp {
             });
         }
 
-        self.selection_bar(ui, ctx);
-
-        // Split by where each file actually is.
-        let local_names: std::collections::HashSet<String> =
-            self.cloud_local.iter().map(|d| d.name.clone()).collect();
-        let in_bucket: Vec<(String, u64, i64)> = self
-            .cloud_files
-            .iter()
-            .filter(|f| !local_names.contains(&local_name(&f.name)))
-            .map(|f| (f.name.clone(), f.size, f.uploaded_ms))
-            .collect();
-
-        if !self.cloud_local.is_empty() {
-            group_label(ui, "On this device", self.cloud_local.len());
-            let mut open: Option<PathBuf> = None;
-            let mut remove: Option<PathBuf> = None;
-            for doc in &self.cloud_local {
-                let sub = format!("On this device · {}", cloud::fmt_size(doc.size));
-                let resp = w::row(ui, true, Some("✔"), &doc.name, Some(&sub), |ui| {
-                    ui.menu_button(RichText::new("…").color(p.muted), |ui| {
-                        if ui.button("Open").clicked() {
-                            open = Some(doc.path.clone());
-                            ui.close();
-                        }
-                        if ui.button("Remove download").clicked() {
-                            remove = Some(doc.path.clone());
-                            ui.close();
-                        }
-                    });
-                });
-                if resp.clicked() {
-                    open = Some(doc.path.clone());
-                }
-                w::hairline(ui);
-            }
-            if let Some(path) = remove {
-                let _ = std::fs::remove_file(&path);
-                self.refresh_local_docs();
-            }
-            if let Some(path) = open {
-                self.open_path(ctx, &path);
-            }
+        // Selecting turns every row's "…" into a checkbox.
+        let selecting = !self.cloud_selected.is_empty();
+        if selecting {
+            self.selection_bar(ui, ctx);
         }
 
+        // Split by where each file actually is.
+        let downloaded: Vec<CloudEntry> = self
+            .cloud_local
+            .iter()
+            .map(|doc| CloudEntry {
+                name: doc.name.clone(),
+                bucket: self
+                    .cloud_files
+                    .iter()
+                    .find(|f| local_name(&f.name) == doc.name)
+                    .map(|f| (f.name.clone(), f.file_id.clone(), f.size, f.uploaded_ms)),
+                local: Some((doc.path.clone(), doc.size)),
+            })
+            .collect();
+        let local_names: std::collections::HashSet<&str> =
+            self.cloud_local.iter().map(|d| d.name.as_str()).collect();
+        let in_bucket: Vec<CloudEntry> = self
+            .cloud_files
+            .iter()
+            .filter(|f| !local_names.contains(local_name(&f.name).as_str()))
+            .map(|f| CloudEntry {
+                name: f.name.clone(),
+                bucket: Some((f.name.clone(), f.file_id.clone(), f.size, f.uploaded_ms)),
+                local: None,
+            })
+            .collect();
+
+        let mut acts: Vec<CloudAct> = Vec::new();
+        if !downloaded.is_empty() {
+            group_label(ui, "On this device", downloaded.len());
+            for e in &downloaded {
+                self.cloud_row(ui, e, selecting, &mut acts);
+            }
+        }
         if !in_bucket.is_empty() {
             group_label(ui, "In your bucket", in_bucket.len());
-            let mut download: Option<(String, u64, bool)> = None;
-            let mut toggle: Option<String> = None;
-            for (name, size, uploaded_ms) in &in_bucket {
-                let picked = self.cloud_selected.contains(name);
-                let sub = format!(
-                    "Click to download · {} · {}",
-                    cloud::fmt_size(*size),
-                    fmt_ts(uploaded_ms / 1000)
-                );
-                let glyph = if picked { "☑" } else { "☁" };
-                let resp = w::row(ui, true, Some(glyph), name, Some(&sub), |ui| {
-                    ui.menu_button(
-                        RichText::new("…").color(if picked { p.accent } else { p.muted }),
-                        |ui| {
-                            if ui.button("Download").clicked() {
-                                download = Some((name.clone(), *size, false));
-                                ui.close();
-                            }
-                            if ui.button(if picked { "Deselect" } else { "Select" }).clicked() {
-                                toggle = Some(name.clone());
-                                ui.close();
-                            }
-                        },
-                    );
-                });
-                if resp.clicked() {
-                    download = Some((name.clone(), *size, true));
-                }
-                w::hairline(ui);
+            for e in &in_bucket {
+                self.cloud_row(ui, e, selecting, &mut acts);
             }
-            if let Some(name) = toggle {
-                if !self.cloud_selected.remove(&name) {
-                    self.cloud_selected.insert(name);
-                }
-                self.confirm_delete_until = None;
-            }
-            if let Some((name, size, open)) = download {
-                self.toast(format!("Downloading {name}"));
-                self.start_cloud_op(ctx, CloudOp::Download(name, size, open));
-            }
+        }
+        for act in acts {
+            self.cloud_act(ctx, act);
         }
 
         if self.cloud_listed && self.cloud_files.is_empty() && self.cloud_local.is_empty() && !busy {
@@ -703,70 +664,339 @@ impl ViewerApp {
         }
     }
 
-    /// Download / delete for the files ticked with … → Select.
-    fn selection_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let n = self.cloud_selected.len();
-        if n == 0 {
-            return;
-        }
+    /// One file. Click: open it (downloading first if needed) — or, while
+    /// selecting, tick it. The "…" menu holds everything else.
+    fn cloud_row(&self, ui: &mut egui::Ui, e: &CloudEntry, selecting: bool, acts: &mut Vec<CloudAct>) {
         let p = w::pal(ui);
-        ui.add_space(10.0);
-        let arming = self.confirm_delete_until.is_some_and(|t| Instant::now() < t);
-        if arming {
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        let mut download = false;
-        let mut delete = false;
-        let mut clear = false;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{n} selected")).color(p.ink));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if w::inline_button(ui, "Clear", true).clicked() {
-                    clear = true;
+        let picked = e.bucket.as_ref().is_some_and(|b| self.cloud_selected.contains(&b.0));
+        let (glyph, sub) = match (&e.local, &e.bucket) {
+            (Some((_, size)), Some(_)) => ("✔", format!("On this computer · {}", cloud::fmt_size(*size))),
+            (Some((_, size)), None) => {
+                ("✔", format!("On this computer only · {}", cloud::fmt_size(*size)))
+            }
+            (None, Some((_, _, size, uploaded))) => (
+                "☁",
+                if selecting {
+                    format!("In your bucket · {} · {}", cloud::fmt_size(*size), fmt_ts(uploaded / 1000))
+                } else {
+                    format!("Click to download · {} · {}", cloud::fmt_size(*size), fmt_ts(uploaded / 1000))
+                },
+            ),
+            (None, None) => ("☁", String::new()),
+        };
+        let resp = w::row(ui, true, Some(glyph), &e.name, Some(&sub), |ui| {
+            if selecting {
+                if let Some(b) = &e.bucket {
+                    if w::check(ui, picked).clicked() {
+                        acts.push(CloudAct::Toggle(b.0.clone()));
+                    }
                 }
-                // Two clicks: these files may be the only copy anywhere.
-                let label = if arming { "Confirm delete" } else { "Delete" };
-                if w::inline_button(ui, label, !self.cloud_busy).clicked() {
-                    delete = true;
+                return;
+            }
+            ui.menu_button(RichText::new("…").size(16.0).color(p.muted), |ui| {
+                ui.set_min_width(190.0);
+                if let Some((path, _)) = &e.local {
+                    if ui.button("Open").clicked() {
+                        acts.push(CloudAct::Open(path.clone()));
+                        ui.close();
+                    }
+                } else if let Some((name, _, size, _)) = &e.bucket {
+                    if ui.button("Download").clicked() {
+                        acts.push(CloudAct::Download(name.clone(), *size, false));
+                        ui.close();
+                    }
+                    if ui.button("Download and open").clicked() {
+                        acts.push(CloudAct::Download(name.clone(), *size, true));
+                        ui.close();
+                    }
                 }
-                if w::inline_button(ui, "Download", !self.cloud_busy).clicked() {
-                    download = true;
+                if let Some((name, id, _, _)) = &e.bucket {
+                    if ui.button("Rename…").clicked() {
+                        acts.push(CloudAct::Rename(name.clone(), id.clone()));
+                        ui.close();
+                    }
+                }
+                if let Some((path, _)) = &e.local {
+                    if ui.button("Remove download").on_hover_text("Keeps it in your bucket").clicked() {
+                        acts.push(CloudAct::RemoveLocal(path.clone()));
+                        ui.close();
+                    }
+                }
+                if let Some((name, id, _, _)) = &e.bucket {
+                    if ui.button("Delete from cloud…").clicked() {
+                        acts.push(CloudAct::Delete(vec![(name.clone(), id.clone())]));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Select").clicked() {
+                        acts.push(CloudAct::Toggle(name.clone()));
+                        ui.close();
+                    }
                 }
             });
         });
+        if resp.clicked() {
+            match (selecting, &e.local, &e.bucket) {
+                (true, _, Some(b)) => acts.push(CloudAct::Toggle(b.0.clone())),
+                (true, _, None) => {}
+                (false, Some((path, _)), _) => acts.push(CloudAct::Open(path.clone())),
+                (false, None, Some((name, _, size, _))) => {
+                    acts.push(CloudAct::Download(name.clone(), *size, true))
+                }
+                (false, None, None) => {}
+            }
+        }
         w::hairline(ui);
-        if clear {
+    }
+
+    fn cloud_act(&mut self, ctx: &egui::Context, act: CloudAct) {
+        match act {
+            CloudAct::Open(path) => self.open_path(ctx, &path),
+            CloudAct::Download(name, size, open) => {
+                self.toast(format!("Downloading {name}"));
+                self.start_cloud_op(ctx, CloudOp::Download(name, size, open));
+            }
+            CloudAct::RemoveLocal(path) => {
+                let _ = std::fs::remove_file(&path);
+                self.refresh_local_docs();
+                self.toast("Removed from this computer; it's still in your bucket");
+            }
+            CloudAct::Rename(name, id) => {
+                let draft = name.clone();
+                self.cloud_dialog = Some(CloudDialog::Rename { name, id, draft, focus: true });
+            }
+            CloudAct::Delete(items) => self.cloud_dialog = Some(CloudDialog::Delete { items }),
+            CloudAct::Toggle(name) => {
+                if !self.cloud_selected.remove(&name) {
+                    self.cloud_selected.insert(name);
+                }
+            }
+        }
+    }
+
+    /// Shown while selecting: what to do with the ticked files.
+    fn selection_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = w::pal(ui);
+        let n = self.cloud_selected.len();
+        let all = self.cloud_files.len();
+        ui.add_space(10.0);
+        let mut select_all = false;
+        let mut download = false;
+        let mut delete = false;
+        let mut cancel = false;
+        egui::Frame::NONE
+            .fill(p.accent_wash())
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(12, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{n} selected"))
+                            .family(theme::medium())
+                            .color(p.ink),
+                    );
+                    if n < all && w::inline_button(ui, "Select all", true).clicked() {
+                        select_all = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if w::inline_button(ui, "Cancel", true).clicked() {
+                            cancel = true;
+                        }
+                        if w::inline_button(ui, "Delete…", !self.cloud_busy).clicked() {
+                            delete = true;
+                        }
+                        if w::inline_button(ui, "Download", true).clicked() {
+                            download = true;
+                        }
+                    });
+                });
+            });
+        if select_all {
+            self.cloud_selected = self.cloud_files.iter().map(|f| f.name.clone()).collect();
+        }
+        if cancel {
             self.cloud_selected.clear();
-            self.confirm_delete_until = None;
         }
         if download {
             let items: Vec<(String, u64)> = self
                 .cloud_files
                 .iter()
                 .filter(|f| self.cloud_selected.contains(&f.name))
+                .filter(|f| !cloud::local_path_for(&f.name).exists())
                 .map(|f| (f.name.clone(), f.size))
                 .collect();
+            let n = items.len();
             for (name, size) in items {
                 self.start_cloud_op(ctx, CloudOp::Download(name, size, false));
             }
+            self.toast(if n == 0 {
+                "Those are all on this computer already".to_string()
+            } else {
+                format!("Downloading {n} document{}", if n == 1 { "" } else { "s" })
+            });
             self.cloud_selected.clear();
         }
         if delete {
-            if arming {
-                let items: Vec<(String, String)> = self
-                    .cloud_files
-                    .iter()
-                    .filter(|f| self.cloud_selected.contains(&f.name))
-                    .map(|f| (f.name.clone(), f.file_id.clone()))
-                    .collect();
-                if !items.is_empty() {
-                    self.start_cloud_op(ctx, CloudOp::Delete(items));
-                }
-                self.confirm_delete_until = None;
-            } else {
-                self.confirm_delete_until = Some(Instant::now() + Duration::from_secs(4));
+            let items: Vec<(String, String)> = self
+                .cloud_files
+                .iter()
+                .filter(|f| self.cloud_selected.contains(&f.name))
+                .map(|f| (f.name.clone(), f.file_id.clone()))
+                .collect();
+            if !items.is_empty() {
+                self.cloud_dialog = Some(CloudDialog::Delete { items });
             }
         }
+        ui.add_space(4.0);
+    }
+
+    /// Rename and delete confirmations.
+    pub(super) fn cloud_dialogs(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.cloud_dialog.take() else { return };
+        let p = theme::palette(self.skin, self.theme.is_dark(ctx));
+        match dialog {
+            CloudDialog::Rename { name, id, mut draft, focus } => {
+                let mut done = false;
+                let mut go = false;
+                let wanted = with_pdf_extension(draft.trim());
+                let clash = wanted != name && self.cloud_files.iter().any(|f| f.name == wanted);
+                let valid = !draft.trim().is_empty() && !draft.contains('/') && wanted != name && !clash;
+                let modal = w::modal("cloud-rename", ctx).show(ctx, |ui| {
+                    ui.set_width(420.0);
+                    ui.label(RichText::new("Rename").text_style(theme::headline()).color(p.ink));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("It's renamed in your bucket, so your phone sees the new name too.")
+                            .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    let edit = w::field(ui, &mut draft, "New name", false, 380.0);
+                    if focus {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+                        go = true;
+                    }
+                    if clash {
+                        ui.label(
+                            RichText::new("There's already a file with that name.")
+                                .small()
+                                .color(ui.visuals().error_fg_color),
+                        );
+                    } else if draft.contains('/') {
+                        ui.label(
+                            RichText::new("Names can't contain “/”.")
+                                .small()
+                                .color(ui.visuals().error_fg_color),
+                        );
+                    }
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if w::primary_button(ui, "Rename", valid).clicked() {
+                                go = true;
+                            }
+                            if w::outlined_button(ui, "Cancel", true).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                });
+                if go {
+                    self.toast(format!("Renaming to {wanted}…"));
+                    self.start_cloud_op(ctx, CloudOp::Rename(name, id, wanted));
+                } else if !done && !modal.should_close() {
+                    self.cloud_dialog = Some(CloudDialog::Rename { name, id, draft, focus: false });
+                }
+            }
+            CloudDialog::Delete { items } => {
+                let mut done = false;
+                let mut go = false;
+                let n = items.len();
+                let modal = w::modal("cloud-delete", ctx).show(ctx, |ui| {
+                    ui.set_width(440.0);
+                    let title = if n == 1 {
+                        "Delete this file?".to_string()
+                    } else {
+                        format!("Delete {n} files?")
+                    };
+                    ui.label(RichText::new(title).text_style(theme::headline()).color(p.ink));
+                    ui.add_space(6.0);
+                    for (name, _) in items.iter().take(5) {
+                        ui.label(RichText::new(format!("·  {name}")).color(p.ink));
+                    }
+                    if n > 5 {
+                        ui.label(RichText::new(format!("…and {} more", n - 5)).color(p.muted));
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "They're removed from your bucket for good — your phone won't see them \
+                             either. Copies downloaded to this computer are removed too.",
+                        )
+                        .color(p.muted),
+                    );
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let delete = w::button(
+                                ui,
+                                RichText::new("Delete").family(theme::medium()),
+                                w::Btn::new(w::Kind::Danger).min(0.0, 32.0),
+                            );
+                            if delete.clicked() {
+                                go = true;
+                            }
+                            if w::outlined_button(ui, "Cancel", true).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                });
+                if go {
+                    for (name, _) in &items {
+                        let _ = std::fs::remove_file(cloud::local_path_for(name));
+                    }
+                    self.refresh_local_docs();
+                    self.cloud_selected.clear();
+                    self.start_cloud_op(ctx, CloudOp::Delete(items));
+                } else if !done && !modal.should_close() {
+                    self.cloud_dialog = Some(CloudDialog::Delete { items });
+                }
+            }
+        }
+    }
+}
+
+/// A file as the Cloud page shows it: in the bucket, on this computer, or both.
+struct CloudEntry {
+    name: String,
+    /// (bucket name, file id, size, uploaded ms)
+    bucket: Option<(String, String, u64, i64)>,
+    /// (downloaded copy, size)
+    local: Option<(PathBuf, u64)>,
+}
+
+enum CloudAct {
+    Open(PathBuf),
+    Download(String, u64, bool),
+    RemoveLocal(PathBuf),
+    Rename(String, String),
+    Delete(Vec<(String, String)>),
+    Toggle(String),
+}
+
+pub(super) enum CloudDialog {
+    Rename { name: String, id: String, draft: String, focus: bool },
+    Delete { items: Vec<(String, String)> },
+}
+
+/// Keeps ".pdf" on a new name, adding it if the reader left it off.
+fn with_pdf_extension(name: &str) -> String {
+    if name.to_ascii_lowercase().ends_with(".pdf") {
+        name.to_string()
+    } else {
+        format!("{name}.pdf")
     }
 }
 

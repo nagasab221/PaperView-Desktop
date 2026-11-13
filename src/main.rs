@@ -53,6 +53,8 @@ fn main() -> eframe::Result<()> {
             // Matches the desktop entry's StartupWMClass, so Linux shells
             // show the right icon and group the windows.
             .with_app_id("paperview")
+            // PaperView draws its own title bar in the app's colours.
+            .with_decorations(false)
             .with_inner_size(size)
             .with_min_inner_size([480.0, 320.0])
             .with_icon(icon)

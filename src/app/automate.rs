@@ -226,6 +226,13 @@ impl ViewerApp {
                         self.cloud_status,
                     );
                 }
+                Some("win") => {
+                    let (max, min, rect) = ctx.input(|i| {
+                        let v = i.viewport();
+                        (v.maximized, v.minimized, v.inner_rect)
+                    });
+                    eprintln!("automate: window maximized={max:?} minimized={min:?} inner={rect:?}");
+                }
                 Some("dt") => {
                     eprintln!(
                         "automate: frame dt={:.3}s stable_dt={:.3}s",
