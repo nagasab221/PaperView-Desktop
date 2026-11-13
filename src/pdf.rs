@@ -38,6 +38,11 @@ impl PdfEngine {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 dirs.push(dir.to_path_buf());
+                // Installed layouts: bin/paperview with lib/ beside bin/.
+                dirs.push(dir.join("lib"));
+                if let Some(prefix) = dir.parent() {
+                    dirs.push(prefix.join("lib").join("paperview"));
+                }
             }
         }
         if let Ok(cwd) = std::env::current_dir() {
@@ -52,12 +57,17 @@ impl PdfEngine {
             }
         }
         Pdfium::bind_to_system_library().map_err(|e| {
+            let (lib, asset, exe) = if cfg!(target_os = "windows") {
+                ("pdfium.dll", "pdfium-win-x64.tgz", "paperview.exe")
+            } else {
+                ("libpdfium.so", "pdfium-linux-x64.tgz", "the paperview program")
+            };
             format!(
-                "Could not load pdfium.dll.\n\n\
-                 Searched next to the executable, in the working directory, and on the system path.\n\
-                 Download `pdfium-win-x64.tgz` from\n\
+                "Could not load {lib}.\n\n\
+                 Searched next to the program, in the working directory, and on the system path.\n\
+                 Download `{asset}` from\n\
                  https://github.com/bblanchon/pdfium-binaries/releases\n\
-                 and place `pdfium.dll` next to paperview.exe.\n\n({e:?})"
+                 and place `{lib}` next to {exe}.\n\n({e:?})"
             )
         })
     }
@@ -234,7 +244,7 @@ impl Document {
         // Internal destination first, then the action (URI etc.).
         if let Some(dest) = link.destination() {
             if let Ok(p) = dest.page_index() {
-                return Ok(Some(LinkTarget::Page(p as i32)));
+                return Ok(Some(LinkTarget::Page(p)));
             }
         }
         if let Some(action) = link.action() {
@@ -247,7 +257,7 @@ impl Document {
                 PdfAction::LocalDestination(local) => {
                     if let Ok(dest) = local.destination() {
                         if let Ok(p) = dest.page_index() {
-                            return Ok(Some(LinkTarget::Page(p as i32)));
+                            return Ok(Some(LinkTarget::Page(p)));
                         }
                     }
                 }
@@ -263,13 +273,13 @@ impl Document {
         fn resolve_page(bookmark: &PdfBookmark<'_>) -> Option<i32> {
             if let Some(dest) = bookmark.destination() {
                 if let Ok(p) = dest.page_index() {
-                    return Some(p as i32);
+                    return Some(p);
                 }
             }
             if let Some(PdfAction::LocalDestination(local)) = bookmark.action() {
                 if let Ok(dest) = local.destination() {
                     if let Ok(p) = dest.page_index() {
-                        return Some(p as i32);
+                        return Some(p);
                     }
                 }
             }

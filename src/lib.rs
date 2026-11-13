@@ -1,7 +1,9 @@
 pub mod app;
 pub mod assoc;
 pub mod cloud;
+pub mod covers;
 pub mod pdf;
 pub mod print;
 pub mod search;
+pub mod ui;
 pub mod view;

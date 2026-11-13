@@ -12,7 +12,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct B2Config {
     pub key_id: String,
     pub app_key: String,
@@ -64,11 +64,27 @@ pub enum CloudOp {
 }
 
 /// Where downloaded PDFs live locally.
+///
+/// Windows: `%LOCALAPPDATA%\PaperView\cloud`. Linux: the XDG data directory
+/// (`~/.local/share/paperview/cloud`) — not the cache or `/tmp`, because a
+/// downloaded document is something the reader expects to still be there.
 pub fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("PaperView").join("cloud")
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        base.join("PaperView").join("cloud")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(std::env::temp_dir);
+        base.join("paperview").join("cloud")
+    }
 }
 
 /// Local path a cloud file would download to.

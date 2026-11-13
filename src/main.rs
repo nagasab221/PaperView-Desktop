@@ -35,16 +35,32 @@ fn main() -> eframe::Result<()> {
         height: 128,
     };
 
+    // Debug builds: PAPERVIEW_SIZE=WxH fixes the window size (UI tests).
+    #[cfg(debug_assertions)]
+    let size = std::env::var("PAPERVIEW_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some([w.parse().ok()?, h.parse().ok()?])
+        })
+        .unwrap_or([1100.0, 800.0]);
+    #[cfg(not(debug_assertions))]
+    let size = [1100.0, 800.0];
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 800.0])
+            .with_title("PaperView")
+            // Matches the desktop entry's StartupWMClass, so Linux shells
+            // show the right icon and group the windows.
+            .with_app_id("paperview")
+            .with_inner_size(size)
             .with_min_inner_size([480.0, 320.0])
             .with_icon(icon)
             // Start invisible; the first frame sends Visible(true) once
             // content has been painted, eliminating any startup flash.
             .with_visible(false),
         // Remember window size/position between sessions.
-        persist_window: true,
+        persist_window: std::env::var_os("PAPERVIEW_SIZE").is_none(),
         // persist_window restores saved state (including visibility) before
         // the window is created. This hook runs after that, forcing the
         // window hidden again so it stays invisible until the first frame.

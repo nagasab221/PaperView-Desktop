@@ -48,7 +48,7 @@ fn renders_fixture_pages() {
     // Page 1 carries black text and a *red* rectangle on white. Counting
     // pixels per class also catches BGRA/RGBA channel swaps.
     let (mut white, mut dark, mut red) = (0usize, 0usize, 0usize);
-    for px in page.rgba.chunks_exact(4) {
+    for px in page.rgba.as_chunks::<4>().0 {
         let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
         assert_eq!(a, 255, "opaque page expected");
         if r > 240 && g > 240 && b > 240 {

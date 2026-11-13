@@ -10,6 +10,16 @@ use eframe::egui;
 use eframe::egui::scroll_area::ScrollSource;
 
 use crate::cloud::{self, B2Config, CloudEvent, CloudFile, CloudOp};
+use crate::covers::Covers;
+use crate::ui::theme::{self, Palette, Skin, ThemeChoice};
+use crate::ui::widgets as w;
+
+#[cfg(debug_assertions)]
+mod automate;
+mod chrome;
+mod library;
+mod peek;
+mod settings;
 use crate::pdf::{Document, LinkTarget, OpenError, PdfEngine, TocEntry};
 use crate::print::{self, PrintEvent};
 use crate::search::SearchState;
@@ -25,7 +35,7 @@ const EDGE_FLIP_COOLDOWN: Duration = Duration::from_millis(300);
 /// before re-rendering at the final resolution.
 const ZOOM_SETTLE: Duration = Duration::from_millis(140);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Zoom {
     FitWidth,
     FitPage,
@@ -38,11 +48,11 @@ enum ViewMode {
     Continuous,
 }
 
+/// What the home view shows when no document is active.
 #[derive(Clone, Copy, PartialEq)]
-enum ThemeChoice {
-    System,
-    Light,
-    Dark,
+enum HomeScreen {
+    Library,
+    Settings,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +63,8 @@ enum ScrollTarget {
     Hit(i32, usize),
     /// Absolute scroll offset (tab-switch restore).
     Offset(egui::Vec2),
+    /// A peek spot: a point a fraction of the way down a page.
+    Spot { page: i32, y_frac: f32, x_frac: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -281,8 +293,45 @@ fn open_file_location(path: &Path) {
         .spawn();
 }
 
+/// Linux: asks the file manager to show the file selected (the freedesktop
+/// FileManager1 interface — Dolphin, Nautilus, Nemo…), falling back to just
+/// opening its folder.
 #[cfg(not(target_os = "windows"))]
-fn open_file_location(_path: &Path) {}
+fn open_file_location(path: &Path) {
+    let uri = file_uri(path);
+    let shown = std::process::Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+        ])
+        .arg(format!("array:string:{uri}"))
+        .arg("string:")
+        .status()
+        .is_ok_and(|s| s.success());
+    if !shown {
+        if let Some(dir) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        }
+    }
+}
+
+/// `file://` URI for a path, percent-encoding anything outside the unreserved set.
+#[cfg(not(target_os = "windows"))]
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
 
 pub struct ViewerApp {
     engine: Option<PdfEngine>,
@@ -365,7 +414,6 @@ pub struct ViewerApp {
     cloud_status: Option<String>,
     cloud_busy: bool,
     cloud_listed: bool,
-    show_cloud_settings: bool,
     cloud_rx: Option<std::sync::mpsc::Receiver<CloudEvent>>,
     /// Live transfer progress: (done, total, bytes/sec).
     cloud_progress: Option<(u64, u64, f64)>,
@@ -386,8 +434,28 @@ pub struct ViewerApp {
     rotation: u8,
     /// Recently closed tabs, most recent last: (path, password).
     closed_tabs: Vec<(PathBuf, Option<String>)>,
+    /// Look: skin, and the palette last applied to egui.
+    skin: Skin,
+    applied: Option<Palette>,
+    home: HomeScreen,
+    /// The user's switch for the Cloud tab (credentials are needed as well).
+    cloud_enabled: bool,
+    /// Credentials being edited in Settings, applied on "Save and connect".
+    b2_draft: B2Config,
+    show_app_key: bool,
+    /// Documents downloaded from the bucket, read from disk.
+    cloud_local: Vec<library::LocalDoc>,
+    covers: Covers,
+    peek: peek::Peek,
+    /// Q went down together with Shift (that was Shift+Q): ignore it until released.
+    q_suppressed: bool,
+    search_open: bool,
+    /// A transient message, bottom centre.
+    toast: Option<(String, Instant)>,
     #[cfg(debug_assertions)]
     announced_first_frame: bool,
+    #[cfg(debug_assertions)]
+    automation: Option<automate::Script>,
     /// Tracks whether we've shown the window yet (avoids startup flash).
     shown: bool,
     /// Frame counter used to defer Visible(true) until the second frame.
@@ -434,7 +502,7 @@ impl ViewerApp {
             print_preview: None,
             tabs: Vec::new(),
             active_tab: None,
-            auto_save: true,
+            auto_save: false,
             auto_save_mb: 20,
             theme: ThemeChoice::System,
             search: SearchState::default(),
@@ -461,7 +529,6 @@ impl ViewerApp {
             cloud_status: None,
             cloud_busy: false,
             cloud_listed: false,
-            show_cloud_settings: false,
             cloud_rx: None,
             cloud_progress: None,
             cloud_last_dl: None,
@@ -473,8 +540,22 @@ impl ViewerApp {
             confirm_delete_until: None,
             rotation: 0,
             closed_tabs: Vec::new(),
+            skin: Skin::Paper,
+            applied: None,
+            home: HomeScreen::Library,
+            cloud_enabled: true,
+            b2_draft: B2Config::default(),
+            show_app_key: false,
+            cloud_local: Vec::new(),
+            covers: Covers::new(engine),
+            peek: peek::Peek::default(),
+            q_suppressed: false,
+            search_open: false,
+            toast: None,
             #[cfg(debug_assertions)]
             announced_first_frame: false,
+            #[cfg(debug_assertions)]
+            automation: automate::Script::from_env(),
             shown: false,
             frame_nr: 0,
         };
@@ -502,20 +583,20 @@ impl ViewerApp {
                     }
                 }
             };
-            app.theme = match storage.get_string("theme").as_deref() {
-                Some("light") => ThemeChoice::Light,
-                Some("dark") => ThemeChoice::Dark,
-                _ => ThemeChoice::System,
-            };
-            match app.theme {
-                ThemeChoice::Light => cc.egui_ctx.set_theme(egui::ThemePreference::Light),
-                ThemeChoice::Dark => cc.egui_ctx.set_theme(egui::ThemePreference::Dark),
-                ThemeChoice::System => {}
+            app.theme = ThemeChoice::from_key(&storage.get_string("theme").unwrap_or_default());
+            app.skin = Skin::from_key(&storage.get_string("skin").unwrap_or_default());
+            app.cloud_enabled = storage.get_string("cloud_enabled").as_deref() != Some("0");
+            if let Some(raw) = storage.get_string("peek_spots") {
+                app.peek.spots = peek::decode_spots(&raw);
             }
+            app.peek.tips_shown = storage
+                .get_string("peek_tips")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             if let Some(z) = storage.get_string("zoom") {
                 app.zoom = zoom_from_str(&z);
             }
-            app.auto_save = storage.get_string("auto_save").as_deref() != Some("0");
+            app.auto_save = storage.get_string("auto_save").as_deref() == Some("1");
             app.auto_save_mb = storage
                 .get_string("auto_save_mb")
                 .and_then(|v| v.parse().ok())
@@ -531,6 +612,10 @@ impl ViewerApp {
                 bucket: storage.get_string("b2_bucket").unwrap_or_default(),
             };
         }
+        app.b2_draft = app.cloud_cfg.clone();
+        theme::install_fonts(&cc.egui_ctx);
+        app.refresh_local_docs();
+
         // Migrate the pre-landing-page "last file" into the recents list.
         if app.recents.is_empty() {
             if let Some(p) = last_file.filter(|p| p.exists()) {
@@ -546,7 +631,7 @@ impl ViewerApp {
 
         // Know the cloud listing early: auto-save needs it to skip files
         // that are already up there.
-        if app.cloud_cfg.ready() {
+        if app.cloud_cfg.ready() && app.cloud_enabled {
             app.start_cloud_op(&cc.egui_ctx, CloudOp::List);
         }
 
@@ -671,7 +756,7 @@ impl ViewerApp {
 
     /// Queues a cloud upload of a just-opened file when auto-save applies.
     fn maybe_auto_save(&mut self, ctx: &egui::Context, path: &Path) {
-        if !self.auto_save || !self.cloud_cfg.ready() {
+        if !self.auto_save || !self.cloud_active() {
             return;
         }
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
@@ -685,7 +770,7 @@ impl ViewerApp {
             .iter()
             .any(|f| f.name == name && f.size == size);
         if should_auto_save(self.auto_save_mb, size, from_cache, already) {
-            self.status = Some(format!("Auto-saving {name} to cloud…"));
+            self.toast(format!("Saving {name} to your bucket…"));
             self.start_cloud_op(ctx, CloudOp::Upload(path.to_path_buf()));
         }
     }
@@ -696,7 +781,12 @@ impl ViewerApp {
         else {
             return;
         };
-        let (page, zoom, rotation) = (self.page_index, self.zoom, self.rotation);
+        let (page, zoom) = self
+            .peek
+            .held_view()
+            .map(|(p, z, _)| (p, z))
+            .unwrap_or((self.page_index, self.zoom));
+        let rotation = self.rotation;
         if let Some(r) = self
             .recents
             .iter_mut()
@@ -773,6 +863,7 @@ impl ViewerApp {
 
     /// Parks the active tab's inline state back into its slot.
     fn stash_active_tab(&mut self) {
+        self.peek_leave_doc();
         if self.doc.is_none() {
             self.active_tab = None;
             return;
@@ -865,6 +956,7 @@ impl ViewerApp {
             self.closed_tabs.remove(0); // drop the oldest, keep recent closes
         }
         if self.active_tab == Some(i) {
+            self.peek_leave_doc();
             self.stash_doc_state();
             self.clear_inline_doc();
             self.tabs.remove(i);
@@ -1083,7 +1175,7 @@ impl ViewerApp {
         let mut do_print = false;
         let mut do_cancel = false;
         let modal = egui::Modal::new(egui::Id::new("print-preview")).show(ctx, |ui| {
-            ui.label(egui::RichText::new("Print preview").strong());
+            ui.label(egui::RichText::new("Print").text_style(theme::headline()));
             let paper_in = (dev_w as f32 / dpi as f32, dev_h as f32 / dpi as f32);
             ui.label(
                 egui::RichText::new(format!(
@@ -1103,6 +1195,13 @@ impl ViewerApp {
                 .color(ui.visuals().weak_text_color()),
             );
             ui.add_space(6.0);
+
+            // Linux has no system print dialog: the choices live here.
+            #[cfg(not(target_os = "windows"))]
+            if let Some(t) = pv.ticket.as_mut() {
+                print::options_ui(ui, t);
+                ui.add_space(10.0);
+            }
 
             // Paper mock-up in the printable area's exact aspect ratio.
             let aspect = dev_h as f32 / dev_w as f32;
@@ -1132,30 +1231,34 @@ impl ViewerApp {
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(pv.page > from, egui::Button::new("◀"))
+                    .add_enabled(pv.page > from, egui::Button::new("‹"))
                     .clicked()
                 {
                     pv.page -= 1;
                 }
                 ui.label(format!("Page {} of {}", pv.page + 1, to + 1));
                 if ui
-                    .add_enabled(pv.page < to, egui::Button::new("▶"))
+                    .add_enabled(pv.page < to, egui::Button::new("›"))
                     .clicked()
                 {
                     pv.page += 1;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        do_cancel = true;
-                    }
-                    if ui.button(egui::RichText::new("Print").strong()).clicked() {
+                    if w::primary_button(ui, "Print", true).clicked() {
                         do_print = true;
+                    }
+                    if w::outlined_button(ui, "Cancel", true).clicked() {
+                        do_cancel = true;
                     }
                 });
             });
         });
         if modal.should_close() {
             do_cancel = true;
+        }
+        // The range may have just changed: keep the previewed page inside it.
+        if let Some(t) = pv.ticket.as_ref() {
+            pv.page = pv.page.clamp(t.from, t.to.max(t.from));
         }
 
         if do_print {
@@ -1201,7 +1304,7 @@ impl ViewerApp {
             .set_file_name(&name);
         if let Some(dest) = dialog.save_file() {
             match std::fs::copy(&src, &dest) {
-                Ok(_) => self.status = Some(format!("Saved a copy to {}", dest.display())),
+                Ok(_) => self.toast(format!("Saved a copy to {}", dest.display())),
                 Err(e) => self.status = Some(format!("Save as failed: {e}")),
             }
         }
@@ -1475,8 +1578,9 @@ impl ViewerApp {
         });
         if !dropped.is_empty() {
             let upload_mode = self.doc.is_none()
+                && self.home == HomeScreen::Library
                 && self.landing_tab == LandingTab::Saved
-                && self.cloud_cfg.ready();
+                && self.cloud_active();
             if upload_mode {
                 let mut queued = 0usize;
                 for path in dropped
@@ -1500,7 +1604,7 @@ impl ViewerApp {
         }
 
         let typing = ctx.egui_wants_keyboard_input();
-        let search_active = self.search.active;
+        let search_active = self.search.active || self.search_open;
         let has_selection = self.selection.is_some();
 
         struct Keys {
@@ -1531,6 +1635,10 @@ impl ViewerApp {
             tab_prev: bool,
             reopen_closed: bool,
             wheel_y: f32,
+            settings: bool,
+            peek_set: bool,
+            peek_down: bool,
+            peek_quick: bool,
         }
         let k = ctx.input_mut(|i| Keys {
             open: i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
@@ -1586,6 +1694,21 @@ impl ViewerApp {
             } else {
                 i.smooth_scroll_delta.y
             },
+            settings: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma),
+            peek_set: !typing && i.consume_key(egui::Modifiers::SHIFT, egui::Key::Q),
+            peek_down: !typing
+                && i.key_down(egui::Key::Q)
+                && !i.modifiers.shift
+                && !i.modifiers.command
+                && !i.modifiers.alt,
+            // Pressed and released within one frame: a tap the held-state
+            // check alone would never see.
+            peek_quick: !typing
+                && i.key_pressed(egui::Key::Q)
+                && !i.key_down(egui::Key::Q)
+                && !i.modifiers.shift
+                && !i.modifiers.command
+                && !i.modifiers.alt,
         });
         self.wheel_y = k.wheel_y;
 
@@ -1606,18 +1729,36 @@ impl ViewerApp {
                 self.close_tab(ctx, i);
             }
         }
-        if k.find {
+        if k.settings {
+            self.open_settings(ctx);
+        }
+        if k.find && self.doc.is_some() {
+            self.search_open = true;
             self.focus_search = true;
         }
         if k.escape {
             if self.selection.is_some() {
                 self.set_selection(None);
             } else {
-                self.search.deactivate();
+                self.close_search();
             }
         }
         if self.doc.is_none() {
             return;
+        }
+        // Peek: Shift+Q saves the spot; Q held peeks, Q tapped jumps.
+        if k.peek_set {
+            self.save_peek_spot();
+            self.q_suppressed = true;
+        }
+        if self.q_suppressed {
+            if !ctx.input(|i| i.key_down(egui::Key::Q)) {
+                self.q_suppressed = false;
+            }
+        } else if k.peek_quick && !self.peek.key_held() {
+            self.peek_tap();
+        } else {
+            self.peek_key(ctx, k.peek_down);
         }
         if k.copy {
             self.copy_selection(ctx);
@@ -1691,420 +1832,11 @@ impl ViewerApp {
 
     // ── chrome ───────────────────────────────────────────────────────────────
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
+    fn thumbs_body(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            // Widgets keep their intrinsic width — never wrap text mid-word.
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            self.tab_strip(ui, &ctx);
-            ui.add_space(4.0);
-            // Deterministic row tiers: clusters stay intact and fold onto
-            // extra rows at fixed widths. Space, not separator bars.
-            let w = ui.available_width();
-            if w >= 980.0 {
-                ui.horizontal(|ui| {
-                    self.tb_file(ui, &ctx);
-                    ui.add_space(14.0);
-                    self.tb_nav(ui);
-                    ui.add_space(14.0);
-                    self.tb_zoom(ui);
-                    ui.add_space(14.0);
-                    self.tb_mode(ui);
-                    ui.add_space(14.0);
-                    self.tb_sidebar(ui);
-                    ui.add_space(14.0);
-                    self.tb_search(ui);
-                    ui.add_space(10.0);
-                    self.tb_menu(ui, &ctx);
-                });
-            } else if w >= 640.0 {
-                ui.horizontal(|ui| {
-                    self.tb_file(ui, &ctx);
-                    ui.add_space(14.0);
-                    self.tb_nav(ui);
-                    ui.add_space(14.0);
-                    self.tb_zoom(ui);
-                });
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    self.tb_mode(ui);
-                    ui.add_space(14.0);
-                    self.tb_sidebar(ui);
-                    ui.add_space(14.0);
-                    self.tb_search(ui);
-                    ui.add_space(10.0);
-                    self.tb_menu(ui, &ctx);
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    self.tb_file(ui, &ctx);
-                    ui.add_space(12.0);
-                    self.tb_nav(ui);
-                });
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    self.tb_zoom(ui);
-                    ui.add_space(12.0);
-                    self.tb_mode(ui);
-                    ui.add_space(12.0);
-                    self.tb_sidebar(ui);
-                });
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    self.tb_search(ui);
-                    ui.add_space(10.0);
-                    self.tb_menu(ui, &ctx);
-                });
-            }
-            ui.add_space(3.0);
-        });
-    }
-
-    /// Browser-style tab strip (only shown when documents are open).
-    fn tab_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            if ui
-                .selectable_label(self.active_tab.is_none(), " Home ")
-                .on_hover_text("Landing page — recents & cloud (tabs stay open)")
-                .clicked()
-            {
-                self.go_home(ctx);
-            }
-            let mut activate: Option<usize> = None;
-            let mut close: Option<usize> = None;
-            egui::ScrollArea::horizontal()
-                .id_salt("tab-strip")
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for (i, tab) in self.tabs.iter().enumerate() {
-                            let selected = self.active_tab == Some(i);
-                            let label = truncate_title(&tab.title);
-                            let resp = ui
-                                .selectable_label(selected, label)
-                                .on_hover_text(tab.path.display().to_string());
-                            if resp.clicked() {
-                                activate = Some(i);
-                            }
-                            if resp.middle_clicked() {
-                                close = Some(i);
-                            }
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Close tab (Ctrl+W)")
-                                .clicked()
-                            {
-                                close = Some(i);
-                            }
-                            ui.add_space(6.0);
-                        }
-                    });
-                });
-            if let Some(i) = activate {
-                self.activate_tab(ctx, i);
-            }
-            if let Some(i) = close {
-                self.close_tab(ctx, i);
-            }
-        });
-        ui.add_space(3.0);
-        ui.separator();
-    }
-
-    fn tb_file(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if ui
-            .button("Open…")
-            .on_hover_text("Open a PDF (Ctrl+O)")
-            .clicked()
+        let left = ((ui.available_width() - THUMB_W) * 0.5).max(8.0);
         {
-            self.open_dialog(ctx);
-        }
-        ui.add_enabled_ui(self.doc.is_some() && !self.printing, |ui| {
-            if ui.button("Print…").on_hover_text("Print (Ctrl+P)").clicked() {
-                self.start_print(ctx);
-            }
-        });
-    }
-
-    fn tb_nav(&mut self, ui: &mut egui::Ui) {
-        let page_count = self.page_count();
-        ui.add_enabled_ui(page_count > 0, |ui| {
-            if ui
-                .button("◀")
-                .on_hover_text("Previous page (PgUp / ←)")
-                .clicked()
             {
-                self.go_to_page(self.page_index - 1);
-            }
-            let field =
-                ui.add(egui::TextEdit::singleline(&mut self.page_field).desired_width(36.0));
-            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Ok(n) = self.page_field.trim().parse::<i32>() {
-                    if n >= 1 && n <= page_count {
-                        self.jump_with_history(n - 1);
-                    }
-                }
-            }
-            if !field.has_focus() {
-                self.page_field = (self.page_index + 1).to_string();
-            }
-            ui.label(
-                egui::RichText::new(format!("/ {page_count}"))
-                    .color(ui.visuals().weak_text_color()),
-            );
-            if ui
-                .button("▶")
-                .on_hover_text("Next page (PgDn / →)")
-                .clicked()
-            {
-                self.go_to_page(self.page_index + 1);
-            }
-        });
-    }
-
-    fn tb_zoom(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.page_count() > 0, |ui| {
-            if ui.button("−").on_hover_text("Zoom out (Ctrl+-)").clicked() {
-                self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
-            }
-            ui.label(
-                egui::RichText::new(format!("{:>4.0}%", self.effective_zoom * 100.0))
-                    .color(ui.visuals().weak_text_color()),
-            );
-            if ui.button("+").on_hover_text("Zoom in (Ctrl+=)").clicked() {
-                self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
-            }
-            ui.add_space(6.0);
-            if ui
-                .selectable_label(self.zoom == Zoom::FitWidth, "Fit width")
-                .clicked()
-            {
-                self.change_zoom(Zoom::FitWidth, None);
-            }
-            if ui
-                .selectable_label(self.zoom == Zoom::FitPage, "Fit page")
-                .clicked()
-            {
-                self.change_zoom(Zoom::FitPage, None);
-            }
-        });
-    }
-
-    fn tb_mode(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.page_count() > 0, |ui| {
-            let scroll = ui
-                .selectable_label(self.mode == ViewMode::Continuous, "Scroll")
-                .on_hover_text("Continuous scrolling — pages flow into each other");
-            if scroll.clicked() && self.mode != ViewMode::Continuous {
-                self.mode = ViewMode::Continuous;
-                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
-            }
-            let single = ui
-                .selectable_label(self.mode == ViewMode::Single, "Single")
-                .on_hover_text("One page at a time (wheel past an edge flips the page)");
-            if single.clicked() && self.mode != ViewMode::Single {
-                self.mode = ViewMode::Single;
-                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
-            }
-        });
-    }
-
-    fn tb_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.doc.is_some(), |ui| {
-            if ui
-                .selectable_label(self.sidebar == SidebarMode::Thumbs, "☰")
-                .on_hover_text("Thumbnail sidebar")
-                .clicked()
-            {
-                self.sidebar = if self.sidebar == SidebarMode::Thumbs {
-                    SidebarMode::Hidden
-                } else {
-                    SidebarMode::Thumbs
-                };
-            }
-            ui.add_enabled_ui(!self.toc.is_empty(), |ui| {
-                if ui
-                    .selectable_label(self.sidebar == SidebarMode::Toc, "TOC")
-                    .on_hover_text("Table of contents (document outline)")
-                    .clicked()
-                {
-                    self.sidebar = if self.sidebar == SidebarMode::Toc {
-                        SidebarMode::Hidden
-                    } else {
-                        SidebarMode::Toc
-                    };
-                }
-            });
-        });
-    }
-
-    fn tb_search(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.page_count() > 0, |ui| {
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut self.search.input)
-                    .desired_width(150.0)
-                    .hint_text("Search (Ctrl+F)"),
-            );
-            if std::mem::take(&mut self.focus_search) {
-                edit.request_focus();
-            }
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.submit_search();
-                edit.request_focus(); // keep typing / Enter again = next
-            }
-            if ui
-                .add_enabled(self.search.active, egui::Button::new("◀"))
-                .on_hover_text("Previous match (Shift+F3)")
-                .clicked()
-            {
-                self.search_step(-1);
-            }
-            if ui
-                .add_enabled(self.search.active, egui::Button::new("▶"))
-                .on_hover_text("Next match (F3)")
-                .clicked()
-            {
-                self.search_step(1);
-            }
-            if self.search.active {
-                let (pos, total) = self.search.counter();
-                let text = if !self.search.done() {
-                    format!("{pos}/{total}…")
-                } else if total == 0 {
-                    "0 results".to_string()
-                } else {
-                    format!("{pos}/{total}")
-                };
-                ui.label(text);
-            }
-        });
-    }
-
-    /// Overflow menu for the less-frequent actions.
-    fn tb_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.menu_button("⋯", |ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            let have_doc = self.doc.is_some();
-            ui.add_enabled_ui(have_doc, |ui| {
-                if ui.button("Rotate left").clicked() {
-                    self.rotate_by(-1);
-                    ui.close();
-                }
-                if ui.button("Rotate right").clicked() {
-                    self.rotate_by(1);
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button("Save as…  (Ctrl+S)").clicked() {
-                    self.save_as();
-                    ui.close();
-                }
-                if ui.button("Open file location").clicked() {
-                    if let Some(p) = self.doc.as_ref().map(|d| d.path.clone()) {
-                        open_file_location(&p);
-                    }
-                    ui.close();
-                }
-                ui.add_enabled_ui(self.cloud_cfg.ready() && !self.cloud_busy, |ui| {
-                    if ui.button("Save to cloud").clicked() {
-                        if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
-                            self.start_cloud_op(ctx, CloudOp::Upload(path));
-                        }
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                if ui.button("Close tab  (Ctrl+W)").clicked() {
-                    self.close_doc(ctx);
-                    ui.close();
-                }
-            });
-            if ui.button("Home (landing page)").clicked() {
-                self.go_home(ctx);
-                ui.close();
-            }
-            ui.separator();
-            if ui
-                .button("Register as PDF viewer")
-                .on_hover_text(
-                    "Adds PaperView to Windows' Open-with list for .pdf \
-                     (current user only). Pick it once with “Always” to make \
-                     it the default.",
-                )
-                .clicked()
-            {
-                self.status = Some(match crate::assoc::register() {
-                    Ok(()) => {
-                        "Registered — right-click a PDF → Open with → PaperView".into()
-                    }
-                    Err(e) => format!("Registration failed: {e}"),
-                });
-                ui.close();
-            }
-            if ui.button("Unregister PDF viewer").clicked() {
-                let _ = crate::assoc::unregister();
-                self.status = Some("Removed PaperView from the Open-with list".into());
-                ui.close();
-            }
-            ui.separator();
-            ui.label(egui::RichText::new("Theme").small().color(ui.visuals().weak_text_color()));
-            if ui
-                .add_enabled(self.theme != ThemeChoice::Light, egui::Button::new("Light"))
-                .clicked()
-            {
-                self.theme = ThemeChoice::Light;
-                ctx.set_theme(egui::ThemePreference::Light);
-                ui.close();
-            }
-            if ui
-                .add_enabled(self.theme != ThemeChoice::Dark, egui::Button::new("Dark"))
-                .clicked()
-            {
-                self.theme = ThemeChoice::Dark;
-                ctx.set_theme(egui::ThemePreference::Dark);
-                ui.close();
-            }
-            if ui
-                .add_enabled(self.theme != ThemeChoice::System, egui::Button::new("System"))
-                .on_hover_text("Follow the OS light/dark setting")
-                .clicked()
-            {
-                self.theme = ThemeChoice::System;
-                ctx.set_theme(egui::ThemePreference::System);
-                ui.close();
-            }
-        })
-        .response
-        .on_hover_text("More actions");
-    }
-
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        if self.status.is_none() {
-            return;
-        }
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.small_button("×").clicked() {
-                    self.status = None;
-                }
-                if let Some(msg) = &self.status {
-                    ui.colored_label(ui.visuals().error_fg_color, msg);
-                }
-            });
-        });
-    }
-
-    fn thumbs_panel(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        egui::Panel::left("thumbs")
-            .exact_size(THUMB_W + 32.0)
-            .resizable(false)
-            .show(ui, |ui| {
                 let ppp = ctx.pixels_per_point();
                 let px_w = ((THUMB_W * ppp).round() as i32).clamp(16, MAX_TEXTURE_DIM);
                 let sizes = Arc::clone(&self.page_sizes);
@@ -2120,7 +1852,7 @@ impl ViewerApp {
                     tops.push((y, h));
                     y += h + gap + 16.0; // room for the page-number caption
                 }
-                let total = egui::vec2(THUMB_W + 16.0, y);
+                let total = egui::vec2(left + THUMB_W + 8.0, y);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -2138,7 +1870,7 @@ impl ViewerApp {
                             let page = i as i32;
                             keep.insert(page);
                             let rect = egui::Rect::from_min_size(
-                                origin + egui::vec2(8.0, top),
+                                origin + egui::vec2(left, top),
                                 egui::vec2(THUMB_W, h),
                             );
                             // Selection ring: a filled accent rect painted under
@@ -2197,7 +1929,8 @@ impl ViewerApp {
                             r == rot && (keep.contains(&p) || (p - self.page_index).abs() < 40)
                         });
                     });
-            });
+            }
+        }
     }
 
     /// Modal dialog asking for an encrypted document's password.
@@ -2248,11 +1981,9 @@ impl ViewerApp {
     }
 
     /// Table-of-contents sidebar.
-    fn toc_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("toc")
-            .exact_size(230.0)
-            .resizable(false)
-            .show(ui, |ui| {
+    fn toc_body(&mut self, ui: &mut egui::Ui) {
+        {
+            {
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -2290,523 +2021,16 @@ impl ViewerApp {
                             self.jump_with_history(page);
                         }
                     });
-            });
-    }
-
-    // ── landing page ─────────────────────────────────────────────────────────
-
-    fn landing(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let avail_w = ui.available_width();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(36.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("PaperView").size(30.0).strong());
-                    ui.label(
-                        egui::RichText::new("Fast, lightweight PDF viewing")
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                    ui.add_space(14.0);
-                    if ui
-                        .button(egui::RichText::new("  Open a PDF…  ").size(16.0))
-                        .clicked()
-                    {
-                        self.open_dialog(&ctx);
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("Ctrl+O, or drop a file anywhere in this window")
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                });
-                ui.add_space(22.0);
-
-                // Same column width on both tabs so the layout never jumps.
-                let col_w = 780.0_f32.min(avail_w - 24.0);
-                let pad = ((avail_w - col_w) * 0.5).max(12.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(pad);
-                    ui.vertical(|ui| {
-                        ui.set_width(col_w);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(
-                                    self.landing_tab == LandingTab::Recent,
-                                    "  Recent  ",
-                                )
-                                .clicked()
-                            {
-                                self.landing_tab = LandingTab::Recent;
-                            }
-                            if ui
-                                .selectable_label(
-                                    self.landing_tab == LandingTab::Saved,
-                                    "  Saved (cloud)  ",
-                                )
-                                .clicked()
-                            {
-                                self.landing_tab = LandingTab::Saved;
-                            }
-                        });
-                        ui.separator();
-                        ui.add_space(6.0);
-                        match self.landing_tab {
-                            LandingTab::Recent => self.landing_recent(ui, &ctx),
-                            LandingTab::Saved => self.landing_saved(ui, &ctx),
-                        }
-                    });
-                });
-                ui.add_space(24.0);
-            });
-    }
-
-    fn landing_recent(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let weak = ui.visuals().weak_text_color();
-        if self.recents.is_empty() {
-            ui.label(
-                egui::RichText::new("Nothing here yet — PDFs you open will appear here.")
-                    .color(weak),
-            );
-            return;
-        }
-        let mut open_req: Option<PathBuf> = None;
-        let mut remove_req: Option<usize> = None;
-        for (i, r) in self.recents.iter().enumerate() {
-            let exists = r.path.exists();
-            let name = r
-                .path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| r.path.display().to_string());
-            ui.horizontal(|ui| {
-                let title = if exists {
-                    egui::RichText::new(&name).size(14.5)
-                } else {
-                    egui::RichText::new(format!("{name} (missing)"))
-                        .size(14.5)
-                        .color(weak)
-                };
-                let btn = ui.add_enabled(exists, egui::Button::new(title).frame(false));
-                let btn = btn.on_hover_text(r.path.display().to_string());
-                if btn.clicked() {
-                    open_req = Some(r.path.clone());
-                }
-                let row_path = r.path.clone();
-                btn.context_menu(move |ui| {
-                    if ui.button("Open file location").clicked() {
-                        open_file_location(&row_path);
-                        ui.close();
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button("×")
-                        .on_hover_text("Remove from this list")
-                        .clicked()
-                    {
-                        remove_req = Some(i);
-                    }
-                    ui.label(egui::RichText::new(fmt_ts(r.ts)).small().color(weak));
-                });
-            });
-            ui.add_space(2.0);
-        }
-        if let Some(i) = remove_req {
-            self.recents.remove(i);
-        }
-        if let Some(p) = open_req {
-            self.open_path(ctx, &p);
-        }
-    }
-
-    fn landing_saved(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let weak = ui.visuals().weak_text_color();
-
-        if !self.cloud_cfg.ready() || self.show_cloud_settings {
-            ui.label(egui::RichText::new("Backblaze B2 storage").strong());
-            ui.add_space(4.0);
-            ui.label(
-                "PDFs you save land in a private B2 bucket (10 GB free). \
-                 Create a bucket plus an application key, then connect:",
-            );
-            ui.hyperlink("https://www.backblaze.com/sign-up/cloud-storage");
-            ui.add_space(8.0);
-            egui::Grid::new("b2-creds").num_columns(2).show(ui, |ui| {
-                ui.label("Key ID");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.cloud_cfg.key_id)
-                        .hint_text("e.g. 005…0001 — the key's ID")
-                        .desired_width(280.0),
-                );
-                ui.end_row();
-                ui.label("Application key");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.cloud_cfg.app_key)
-                        .password(true)
-                        .hint_text("secret starting with K… (shown once at creation)")
-                        .desired_width(280.0),
-                );
-                ui.end_row();
-                ui.label("Bucket name");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.cloud_cfg.bucket)
-                        .hint_text("exact bucket name")
-                        .desired_width(280.0),
-                );
-                ui.end_row();
-            });
-            let key = self.cloud_cfg.app_key.trim();
-            if !key.is_empty() && !key.starts_with('K') {
-                ui.add_space(2.0);
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    "⚠ That looks like a key ID, not the application key — the secret \
-                     starts with “K” and is only shown when the key is created. \
-                     Create a new key if you didn't copy it.",
-                );
             }
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(
-                    "Stored locally, in plain text, in PaperView's settings file.",
-                )
-                .small()
-                .color(weak),
-            );
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(self.cloud_cfg.ready(), egui::Button::new("Connect"))
-                    .clicked()
-                {
-                    self.show_cloud_settings = false;
-                    self.cloud_listed = false;
-                    self.cloud_status = None;
-                    self.start_cloud_op(ctx, CloudOp::List);
-                }
-                if self.show_cloud_settings && ui.button("Cancel").clicked() {
-                    self.show_cloud_settings = false;
-                }
-                if let Some(s) = &self.cloud_status {
-                    ui.colored_label(ui.visuals().error_fg_color, s);
-                }
-            });
-            return;
         }
-
-        // Auto-list once (errors stop the retry until Refresh/Connect).
-        if !self.cloud_listed && !self.cloud_busy && self.cloud_status.is_none() {
-            self.start_cloud_op(ctx, CloudOp::List);
-        }
-
-        ui.horizontal(|ui| {
-            if self.cloud_busy {
-                ui.spinner();
-            }
-            if let Some(s) = &self.cloud_status {
-                ui.label(s.clone());
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
-                    self.show_cloud_settings = true;
-                }
-                if ui
-                    .add_enabled(!self.cloud_busy, egui::Button::new("Refresh"))
-                    .clicked()
-                {
-                    self.cloud_listed = false;
-                    self.cloud_status = None;
-                    self.start_cloud_op(ctx, CloudOp::List);
-                }
-                if ui
-                    .add_enabled(!self.cloud_busy, egui::Button::new("Upload a PDF…"))
-                    .clicked()
-                {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("PDF documents", &["pdf"])
-                        .pick_file()
-                    {
-                        self.start_cloud_op(ctx, CloudOp::Upload(path));
-                    }
-                }
-            });
-        });
-        ui.add_space(8.0);
-
-        // Stats sidebar on the left, file list on the right.
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(232.0);
-                self.cloud_stats_card(ui);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                if self.cloud_files.is_empty() && self.cloud_listed && !self.cloud_busy {
-                    ui.label(
-                        egui::RichText::new(
-                            "No PDFs saved yet — open one and press Save to cloud, \
-                             drop PDFs here, or upload above.",
-                        )
-                        .color(weak),
-                    );
-                    return;
-                }
-                let selected_n = self.cloud_selected.len();
-                if selected_n > 0 {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{selected_n} selected"));
-                        if ui
-                            .add_enabled(!self.cloud_busy, egui::Button::new("Download"))
-                            .on_hover_text("Download all selected (skips already-cached)")
-                            .clicked()
-                        {
-                            let items: Vec<(String, u64)> = self
-                                .cloud_files
-                                .iter()
-                                .filter(|f| {
-                                    self.cloud_selected.contains(&f.name)
-                                        && !cloud::local_path_for(&f.name).exists()
-                                })
-                                .map(|f| (f.name.clone(), f.size))
-                                .collect();
-                            for (name, size) in items {
-                                self.start_cloud_op(ctx, CloudOp::Download(name, size, false));
-                            }
-                        }
-                        let arming = self
-                            .confirm_delete_until
-                            .is_some_and(|t| Instant::now() < t);
-                        if arming {
-                            // Keep repainting so the countdown label ticks.
-                            ui.ctx().request_repaint_after(Duration::from_millis(200));
-                        }
-                        let secs_left = self
-                            .confirm_delete_until
-                            .map(|t| {
-                                let remaining = t.saturating_duration_since(Instant::now());
-                                remaining.as_secs_f32()
-                            })
-                            .unwrap_or(0.0);
-                        let del_label = if arming {
-                            format!("Confirm delete {selected_n}? ({secs_left:.0}s)")
-                        } else {
-                            "Delete".to_string()
-                        };
-                        if ui
-                            .add_enabled(!self.cloud_busy, egui::Button::new(del_label))
-                            .on_hover_text("Permanently deletes from the bucket")
-                            .clicked()
-                        {
-                            if arming {
-                                let items: Vec<(String, String)> = self
-                                    .cloud_files
-                                    .iter()
-                                    .filter(|f| self.cloud_selected.contains(&f.name))
-                                    .map(|f| (f.name.clone(), f.file_id.clone()))
-                                    .collect();
-                                if !items.is_empty() {
-                                    self.start_cloud_op(ctx, CloudOp::Delete(items));
-                                }
-                                self.confirm_delete_until = None;
-                            } else {
-                                self.confirm_delete_until =
-                                    Some(Instant::now() + Duration::from_secs(4));
-                            }
-                        }
-                        if ui.button("Clear").clicked() {
-                            self.cloud_selected.clear();
-                            self.confirm_delete_until = None;
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-
-                // Collect file data first so we can borrow &mut self freely in the loop.
-                let file_data: Vec<(String, u64, i64, PathBuf)> = self
-                    .cloud_files
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.clone(),
-                            f.size,
-                            f.uploaded_ms,
-                            cloud::local_path_for(&f.name),
-                        )
-                    })
-                    .collect();
-                for (name, size, uploaded_ms, local) in &file_data {
-                    ui.horizontal(|ui| {
-                        let mut sel = self.cloud_selected.contains(name.as_str());
-                        if ui.checkbox(&mut sel, "").changed() {
-                            if sel {
-                                self.cloud_selected.insert(name.clone());
-                            } else {
-                                self.cloud_selected.remove(name);
-                            }
-                            self.confirm_delete_until = None;
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(name).size(14.0));
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} — {}",
-                                    cloud::fmt_size(*size),
-                                    fmt_ts(uploaded_ms / 1000)
-                                ))
-                                .small()
-                                .color(weak),
-                            );
-                        });
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if local.exists() {
-                                    if ui.button("Open").clicked() {
-                                        self.open_path(ctx, local);
-                                    }
-                                } else if ui
-                                    .add_enabled(
-                                        !self.cloud_busy,
-                                        egui::Button::new("Download"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.start_cloud_op(
-                                        ctx,
-                                        CloudOp::Download(name.clone(), *size, true),
-                                    );
-                                }
-                            },
-                        );
-                    });
-                    ui.add_space(3.0);
-                }
-            });
-        });
-    }
-
-    /// The stats sidebar of the Saved tab.
-    fn cloud_stats_card(&mut self, ui: &mut egui::Ui) {
-        let weak = ui.visuals().weak_text_color();
-        let used: u64 = self.cloud_files.iter().map(|f| f.size).sum();
-        let count = self.cloud_files.len();
-        let left = FREE_TIER_BYTES.saturating_sub(used);
-        let frac = (used as f32 / FREE_TIER_BYTES as f32).clamp(0.0, 1.0);
-        let largest = self.cloud_files.iter().max_by_key(|f| f.size);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-
-            ui.label(egui::RichText::new("Bucket").small().color(weak));
-            ui.label(egui::RichText::new(self.cloud_cfg.bucket.trim()).strong());
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Storage").small().color(weak));
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .text(format!("{} used", cloud::fmt_size(used))),
-            );
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} left of {} (free tier)",
-                    cloud::fmt_size(left),
-                    cloud::fmt_size(FREE_TIER_BYTES)
-                ))
-                .small()
-                .color(weak),
-            );
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Files").small().color(weak));
-            ui.label(format!("{count} saved"));
-            if let Some(f) = largest {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "largest: {} ({})",
-                        f.name,
-                        cloud::fmt_size(f.size)
-                    ))
-                    .small()
-                    .color(weak),
-                );
-            }
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Local cache").small().color(weak));
-            ui.label(format!(
-                "{} file{} · {}",
-                self.cloud_cache.0,
-                if self.cloud_cache.0 == 1 { "" } else { "s" },
-                cloud::fmt_size(self.cloud_cache.1)
-            ));
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Transfers").small().color(weak));
-            match self.cloud_last_dl {
-                Some((bps, ts)) => {
-                    ui.label(format!("down: {} (at {})", fmt_speed(bps), fmt_time(ts)))
-                }
-                None => ui.label(egui::RichText::new("no downloads yet").color(weak)),
-            };
-            match self.cloud_last_ul {
-                Some((bps, ts)) => {
-                    ui.label(format!("up: {} (at {})", fmt_speed(bps), fmt_time(ts)))
-                }
-                None => ui.label(egui::RichText::new("no uploads yet").color(weak)),
-            };
-
-            if let Some((done, total, bps)) = self.cloud_progress {
-                ui.add_space(6.0);
-                ui.add(
-                    egui::ProgressBar::new(done as f32 / total.max(1) as f32).text(format!(
-                        "{} / {} — {}",
-                        cloud::fmt_size(done),
-                        cloud::fmt_size(total),
-                        fmt_speed(bps)
-                    )),
-                );
-            }
-
-            if let Some(ts) = self.cloud_refreshed {
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!("refreshed at {}", fmt_time(ts)))
-                        .small()
-                        .color(weak),
-                );
-            }
-
-            ui.add_space(6.0);
-            ui.separator();
-            ui.checkbox(&mut self.auto_save, "Auto-save opened PDFs")
-                .on_hover_text(
-                    "Every PDF you open is uploaded here automatically \
-                     (unless it is bigger than the limit or already saved).",
-                );
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("up to").small().color(weak));
-                ui.add_enabled(
-                    self.auto_save,
-                    egui::DragValue::new(&mut self.auto_save_mb).range(1..=500),
-                );
-                ui.label(egui::RichText::new("MB").small().color(weak));
-            });
-        });
     }
 
     // ── page views ───────────────────────────────────────────────────────────
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        let canvas = if self.doc.is_none() {
-            ui.visuals().panel_fill // landing page sits on the normal background
-        } else if ui.visuals().dark_mode {
-            egui::Color32::from_gray(32)
-        } else {
-            egui::Color32::from_gray(200)
-        };
+        let p = w::pal(ui);
+        // Pages sit on the skin's viewport tone; the home view on its paper.
+        let canvas = if self.doc.is_none() { p.background } else { p.viewport };
         let frame = egui::Frame::NONE.fill(canvas);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if let Some(msg) = &self.engine_error {
@@ -2816,7 +2040,7 @@ impl ViewerApp {
                 return;
             }
             if self.doc.is_none() {
-                self.landing(ui);
+                self.home_view(ui);
                 return;
             }
             if self.page_sizes.is_empty() {
@@ -2880,6 +2104,13 @@ impl ViewerApp {
                 ScrollTarget::PageTop(p) => ((rect_for(p).min.y - PAGE_GAP).max(0.0), None),
                 ScrollTarget::PageBottom(p) => {
                     ((rect_for(p).max.y + PAGE_GAP - avail.y).max(0.0), None)
+                }
+                ScrollTarget::Spot { page, y_frac, x_frac } => {
+                    let r = rect_for(page);
+                    (
+                        (r.min.y + y_frac * r.height()).max(0.0),
+                        Some((x_frac * layout.content.x).max(0.0)),
+                    )
                 }
                 ScrollTarget::Hit(p, h) => {
                     let r = rect_for(p);
@@ -3165,8 +2396,25 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.automate(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // The look follows the chosen skin and light/dark (System tracks the OS).
+        let palette = theme::palette(self.skin, self.theme.is_dark(&ctx));
+        if self.applied != Some(palette) {
+            theme::apply(&ctx, &palette);
+            w::set_pal(&ctx, palette);
+            self.applied = Some(palette);
+            // This frame's root Ui took its style before the change; hand it
+            // the new one so the first frame already speaks the new type scale.
+            ui.set_style(ctx.global_style());
+        }
+        self.covers.pump(&ctx);
 
         // Defer showing the window until the second frame.  On frame 1 the
         // content is painted into the backbuffer but hasn't been swapped to
@@ -3196,11 +2444,11 @@ impl eframe::App for ViewerApp {
         if let Some(rx) = &self.print_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    PrintEvent::Status(s) => self.status = Some(s),
+                    PrintEvent::Status(s) => self.toast = Some((s, Instant::now())),
                     PrintEvent::Done(pages) => {
-                        self.status = Some(format!(
-                            "Printed {pages} page{}",
-                            if pages == 1 { "" } else { "s" }
+                        self.toast = Some((
+                            format!("Sent {pages} page{} to the printer", if pages == 1 { "" } else { "s" }),
+                            Instant::now(),
                         ));
                         self.printing = false;
                     }
@@ -3215,6 +2463,7 @@ impl eframe::App for ViewerApp {
         // Drain cloud-worker events.
         let mut open_after: Option<PathBuf> = None;
         let mut relist = false;
+        let mut refresh_local = false;
         if let Some(rx) = &self.cloud_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -3230,7 +2479,7 @@ impl eframe::App for ViewerApp {
                         self.cloud_busy = false;
                         self.cloud_status = None;
                         self.cloud_refreshed = Some(now_ts());
-                        self.cloud_cache = cloud::cache_stats();
+                        refresh_local = true;
                     }
                     CloudEvent::Progress { done, total, bps } => {
                         self.cloud_progress = Some((done, total, bps));
@@ -3241,7 +2490,7 @@ impl eframe::App for ViewerApp {
                         self.cloud_progress = None;
                         self.cloud_last_dl =
                             Some((bytes as f64 / secs.max(1e-3), now_ts()));
-                        self.cloud_cache = cloud::cache_stats();
+                        refresh_local = true;
                         if open {
                             open_after = Some(path);
                         }
@@ -3264,6 +2513,9 @@ impl eframe::App for ViewerApp {
                     }
                 }
             }
+        }
+        if refresh_local {
+            self.refresh_local_docs();
         }
         // Run the next queued op, or refresh the listing after a batch.
         if !self.cloud_busy {
@@ -3294,16 +2546,15 @@ impl eframe::App for ViewerApp {
         self.handle_input(&ctx);
         self.password_modal(&ctx);
         self.print_preview_modal(&ctx);
-        self.toolbar(ui);
-        self.status_bar(ui);
+        self.top_bar(ui);
         if self.doc.is_some() {
-            match self.sidebar {
-                SidebarMode::Thumbs => self.thumbs_panel(ui),
-                SidebarMode::Toc => self.toc_panel(ui),
-                SidebarMode::Hidden => {}
+            self.bottom_bar(ui);
+            if self.sidebar != SidebarMode::Hidden {
+                self.sidebar_panel(ui);
             }
         }
         self.central(ui);
+        self.overlays(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -3325,15 +2576,11 @@ impl eframe::App for ViewerApp {
             }
             .to_string(),
         );
-        storage.set_string(
-            "theme",
-            match self.theme {
-                ThemeChoice::System => "system",
-                ThemeChoice::Light => "light",
-                ThemeChoice::Dark => "dark",
-            }
-            .to_string(),
-        );
+        storage.set_string("theme", self.theme.key().to_string());
+        storage.set_string("skin", self.skin.key().to_string());
+        storage.set_string("cloud_enabled", if self.cloud_enabled { "1" } else { "0" }.to_string());
+        storage.set_string("peek_spots", peek::encode_spots(&self.peek.spots));
+        storage.set_string("peek_tips", self.peek.tips_shown.to_string());
         storage.set_string("zoom", zoom_to_str(self.zoom));
         storage.set_string("recents", encode_recents(&self.recents));
         storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());
@@ -3462,3 +2709,4 @@ mod tests {
         assert_eq!(decode_recents("123\tC:\\ok.pdf").len(), 1);
     }
 }
+

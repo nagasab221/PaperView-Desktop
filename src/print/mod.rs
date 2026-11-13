@@ -10,7 +10,7 @@ pub use windows::{show_dialog, spawn_print, PrintTicket};
 #[cfg(not(target_os = "windows"))]
 mod linux;
 #[cfg(not(target_os = "windows"))]
-pub use linux::{show_dialog, spawn_print, PrintTicket};
+pub use linux::{options_ui, show_dialog, spawn_print, PrintTicket};
 
 pub enum PrintEvent {
     Status(String),

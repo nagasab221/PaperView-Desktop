@@ -1,8 +1,8 @@
 [package]
 name = "paperview"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Lightweight, fast-starting PDF viewer for Windows"
+description = "PaperView: a lightweight, fast-starting PDF reader for Linux and Windows"
 
 [dependencies]
 # eframe 0.35 defaults to the wgpu backend; we swap it for glow (OpenGL) —
