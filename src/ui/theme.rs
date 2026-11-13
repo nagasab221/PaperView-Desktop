@@ -195,6 +195,12 @@ impl Palette {
         Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
     }
 
+    /// The tray the document tabs sit in: a shade deeper than the page, so
+    /// the active tab — a card in the page's own colour — stands forward.
+    pub fn tray(&self) -> Color32 {
+        Self::mix(self.background, self.ink, if self.dark { 0.045 } else { 0.035 })
+    }
+
     /// The faint wash behind a hovered row or button.
     pub fn hover(&self) -> Color32 {
         Self::mix(self.background, self.ink, if self.dark { 0.08 } else { 0.05 })

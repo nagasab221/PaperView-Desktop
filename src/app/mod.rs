@@ -466,6 +466,8 @@ pub struct ViewerApp {
     ui_scale_draft: f32,
     library_layout: density::LibraryLayout,
     preview: Option<density::Preview>,
+    /// Where the active tab's card meets the rule under the tab strip.
+    active_tab_span: Option<egui::Rangef>,
     /// The sidebar's last open mode, shown while it slides shut.
     sidebar_last: SidebarMode,
     /// A transient message, bottom centre.
@@ -574,6 +576,7 @@ impl ViewerApp {
             folders_scanned: None,
             folder_scan: None,
             sidebar_last: SidebarMode::Thumbs,
+            active_tab_span: None,
             ui_scale: 1.0,
             ui_scale_draft: 1.0,
             library_layout: density::LibraryLayout::Covers,

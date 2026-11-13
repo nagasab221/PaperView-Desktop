@@ -518,42 +518,6 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str, action: Option<(&str, &
     ui.add_space(24.0);
 }
 
-/// A diffuse glow filling `rect`: strongest along its bottom edge and centre,
-/// fading towards the top and the sides — the PaperView take on a Plasma
-/// taskbar's active-task highlight. `color` is the glow at full strength.
-pub fn glow(painter: &egui::Painter, rect: egui::Rect, color: Color32, strength: f32) {
-    if strength <= 0.0 || !rect.is_positive() {
-        return;
-    }
-    // A 7 × 4 grid of vertices: alpha falls off with height (quadratically)
-    // and towards the sides, so the wash reads as light, not as a box.
-    const COLS: usize = 7;
-    const ROWS: usize = 4;
-    let mut mesh = egui::Mesh::default();
-    for r in 0..ROWS {
-        let fy = r as f32 / (ROWS - 1) as f32; // 0 top .. 1 bottom
-        let y = egui::lerp(rect.top()..=rect.bottom(), fy);
-        let vertical = 0.08 + 0.92 * fy * fy;
-        for c in 0..COLS {
-            let fx = c as f32 / (COLS - 1) as f32;
-            let x = egui::lerp(rect.left()..=rect.right(), fx);
-            let centred = 1.0 - (2.0 * fx - 1.0).abs(); // 0 at sides, 1 in the middle
-            let horizontal = 0.45 + 0.55 * centred.powf(0.6);
-            let a = (strength * vertical * horizontal).clamp(0.0, 1.0);
-            mesh.colored_vertex(egui::pos2(x, y), color.gamma_multiply(a));
-        }
-    }
-    for r in 0..ROWS - 1 {
-        for c in 0..COLS - 1 {
-            let i = (r * COLS + c) as u32;
-            let j = i + COLS as u32;
-            mesh.add_triangle(i, i + 1, j);
-            mesh.add_triangle(i + 1, j + 1, j);
-        }
-    }
-    painter.add(egui::Shape::mesh(mesh));
-}
-
 /// A dialog in the house style: paper surface, hairline, generous margins.
 pub fn modal(id: &str, ctx: &egui::Context) -> egui::Modal {
     let p = ctx

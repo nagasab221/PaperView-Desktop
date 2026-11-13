@@ -44,9 +44,10 @@ impl ViewerApp {
             .active_tab
             .and_then(|i| self.tabs.get(i))
             .map(|t| t.title.clone());
+        let fill = if self.tabs.is_empty() { p.background } else { p.tray() };
         egui::Panel::top("titlebar")
             .exact_size(TITLE_H)
-            .frame(egui::Frame::NONE.fill(p.background))
+            .frame(egui::Frame::NONE.fill(fill))
             .show_separator_line(false)
             .show(ui, |ui| {
                 let bar = ui.max_rect();
@@ -115,7 +116,7 @@ impl ViewerApp {
                     let fill = if close { red.gamma_multiply(t) } else { p.hover().gamma_multiply(t) };
                     ui.painter().rect_filled(rect, 0, fill);
                     let ink = if close { p.ink.lerp_to_gamma(egui::Color32::WHITE, t) } else { p.ink };
-                    let behind = p.background.lerp_to_gamma(p.hover(), t);
+                    let behind = fill.lerp_to_gamma(p.hover(), t);
                     paint_win_glyph(ui.painter(), rect.center(), which, maximized, ink, behind);
                     if resp.clicked() {
                         ctx.send_viewport_cmd(match which {
@@ -197,8 +198,9 @@ impl ViewerApp {
         }
         let ctx = ui.ctx().clone();
         let p = w::pal(ui);
+        self.active_tab_span = None;
         egui::Panel::top("topbar")
-            .frame(egui::Frame::NONE.fill(p.background))
+            .frame(egui::Frame::NONE.fill(p.tray()))
             .show_separator_line(false)
             .show(ui, |ui| {
                 // The active tab's underline sits right on the rule below.
@@ -242,9 +244,24 @@ impl ViewerApp {
                         }
                     });
                 });
-                w::hairline(ui);
+                // The rule under the tabs, broken where the active card joins
+                // the page below.
+                let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+                let stroke = Stroke::new(1.0, p.hairline);
+                match self.active_tab_span {
+                    Some(span) => {
+                        ui.painter().hline(rule.left()..=span.min, rule.center().y, stroke);
+                        ui.painter().hline(span.max..=rule.right(), rule.center().y, stroke);
+                    }
+                    None => {
+                        ui.painter().hline(rule.x_range(), rule.center().y, stroke);
+                    }
+                }
                 if self.search_open && self.doc.is_some() {
-                    self.search_row(ui);
+                    egui::Frame::NONE.fill(p.background).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.search_row(ui);
+                    });
                     w::hairline(ui);
                 }
             });
@@ -256,6 +273,8 @@ impl ViewerApp {
         let mut activate: Option<usize> = None;
         let mut close: Option<usize> = None;
         let mut home = false;
+        let mut span: Option<egui::Rect> = None;
+        let clip = ui.clip_rect();
         egui::ScrollArea::horizontal()
             .id_salt("tab-strip")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -263,11 +282,15 @@ impl ViewerApp {
                 ui.horizontal(|ui| {
                     ui.set_height(TAB_H);
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if tab_item(ui, &p, band, "Library", None, self.active_tab.is_none()).0 {
+                    let lib = tab_item(ui, &p, band, "Library", None, self.active_tab.is_none());
+                    if lib.0 {
                         home = true;
                     }
+                    if self.active_tab.is_none() {
+                        span = Some(lib.2);
+                    }
                     for (i, tab) in self.tabs.iter().enumerate() {
-                        let (clicked, closed) = tab_item(
+                        let (clicked, closed, rect) = tab_item(
                             ui,
                             &p,
                             band,
@@ -275,6 +298,9 @@ impl ViewerApp {
                             Some(&tab.path.display().to_string()),
                             self.active_tab == Some(i),
                         );
+                        if self.active_tab == Some(i) {
+                            span = Some(rect);
+                        }
                         if clicked {
                             activate = Some(i);
                         }
@@ -284,6 +310,11 @@ impl ViewerApp {
                     }
                 });
             });
+        // Where the active card meets the rule, clipped to what's visible.
+        self.active_tab_span = span
+            .map(|r| r.x_range())
+            .filter(|r| r.max > clip.left() && r.min < clip.right())
+            .map(|r| egui::Rangef::new(r.min.max(clip.left()), r.max.min(clip.right())));
         if home {
             self.home = HomeScreen::Library;
             self.go_home(ctx);
@@ -661,12 +692,13 @@ impl ViewerApp {
     }
 }
 
-/// One tab in the strip: (clicked, close clicked). `path` makes it closable.
+/// One tab in the strip: (clicked, close clicked, its rect). `path` makes it
+/// closable.
 ///
-/// Styled after a Plasma taskbar: the active tab glows with the accent —
-/// strongest along its bottom edge, diffusing upward and to the sides — over
-/// a solid accent line; other open documents get a faint wash and a dim line,
-/// like running-but-unfocused tasks. Everything fades as tabs change.
+/// Index cards: the active tab is a card in the page's own colour, with
+/// hairline edges, rounded top corners and a thin accent line along its top,
+/// open at the bottom where it joins the page. Other tabs are plain text in
+/// the tray, showing a faint card outline on hover.
 fn tab_item(
     ui: &mut egui::Ui,
     p: &theme::Palette,
@@ -674,9 +706,10 @@ fn tab_item(
     title: &str,
     path: Option<&str>,
     active: bool,
-) -> (bool, bool) {
+) -> (bool, bool, egui::Rect) {
     const PAD: f32 = 14.0;
     const CLOSE: f32 = 20.0;
+    const LIFT: f32 = 7.0;
     let rt = RichText::new(title);
     let rt = if active { rt.family(theme::medium()) } else { rt };
     let galley = egui::WidgetText::from(rt).into_galley(
@@ -693,35 +726,49 @@ fn tab_item(
     let resp = ui.interact(rect, ui.id().with(("tab", title, path)), Sense::click());
 
     let hover = w::hover_t(ui, &resp, !active);
-    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, 0.2);
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-fills")))
-        .with_clip_rect(rect.intersect(ui.clip_rect().expand2(egui::vec2(0.0, 40.0))));
+    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, w::HOVER_FADE);
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-cards")))
+        .with_clip_rect(ui.clip_rect().expand2(egui::vec2(0.0, 2.0)));
 
-    // Light: the active glow, or a running document's faint wash.
-    let running = if closable { 0.55 } else { 0.0 };
-    let wash = (running * (1.0 - on) + hover * 0.6 * (1.0 - on)).min(1.0);
-    if wash > 0.0 {
-        painter.rect_filled(rect.shrink2(egui::vec2(1.0, 0.0)), 0, p.hover().gamma_multiply(wash));
-    }
-    let glow_strength = if p.dark { 0.62 } else { 0.48 };
-    w::glow(&painter, rect.shrink2(egui::vec2(1.0, 0.0)), p.accent, on * glow_strength);
-
-    // The edge line: dim for open documents, accent for the active one. On a
-    // layer above the strip, so its scroll area can't clip the bottom pixels.
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-lines")))
-        .with_clip_rect(rect.expand2(egui::vec2(0.0, 2.0)));
-    let line_y = rect.bottom() - 1.0;
-    if running > 0.0 || hover > 0.0 {
-        let dim = p.muted.gamma_multiply(0.35 * (running + hover * 0.6).min(1.0) * (1.0 - on));
-        painter.hline(rect.x_range(), line_y, Stroke::new(1.0, dim));
-    }
+    // The card: from a little below the top of the band down over the rule.
+    let card = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + LIFT),
+        egui::pos2(rect.right(), rect.bottom() + 1.0),
+    );
+    let corners = egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
     if on > 0.0 {
-        painter.hline(rect.x_range(), line_y, Stroke::new(2.0, p.accent.gamma_multiply(on)));
+        painter.rect(
+            card,
+            corners,
+            p.tray().lerp_to_gamma(p.background, on),
+            Stroke::new(1.0, p.hairline.gamma_multiply(on)),
+            egui::StrokeKind::Inside,
+        );
+        // Open at the bottom: the card runs on into the page.
+        painter.hline(
+            card.left() + 1.0..=card.right() - 1.0,
+            card.bottom() - 0.5,
+            Stroke::new(1.5, p.tray().lerp_to_gamma(p.background, on)),
+        );
+        painter.hline(
+            card.left() + 5.0..=card.right() - 5.0,
+            card.top() + 1.0,
+            Stroke::new(2.0, p.accent.gamma_multiply(on)),
+        );
+    } else if hover > 0.0 {
+        painter.rect(
+            card.with_max_y(rect.bottom() - 1.0),
+            corners,
+            p.hover().gamma_multiply(hover * 0.7),
+            Stroke::new(1.0, p.hairline.gamma_multiply(hover * 0.8)),
+            egui::StrokeKind::Inside,
+        );
     }
 
-    // Open-but-unfocused documents keep readable text, as on the taskbar.
-    let text_color = p.muted.lerp_to_gamma(p.ink, hover.max(on).max(running * 1.2));
-    let text_pos = egui::pos2(rect.left() + PAD, rect.center().y - galley.size().y * 0.5);
+    let text_color = p.muted.lerp_to_gamma(p.ink, hover.max(on).max(if closable { 0.7 } else { 0.0 }));
+    let text_pos = egui::pos2(rect.left() + PAD, card.center().y - galley.size().y * 0.5);
     painter.galley(text_pos, galley, text_color);
 
     if resp.hovered() {
@@ -735,19 +782,19 @@ fn tab_item(
     if closable {
         // The close button sits inside the tab and takes its own clicks.
         let x_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 6.0 - CLOSE * 0.5, rect.center().y),
+            egui::pos2(rect.right() - 6.0 - CLOSE * 0.5, card.center().y),
             egui::vec2(CLOSE, CLOSE),
         );
         let x = ui.interact(x_rect, resp.id.with("close"), Sense::click());
         let xt = w::hover_t(ui, &x, true);
         if xt > 0.0 {
-            ui.painter().circle_filled(x_rect.center(), CLOSE * 0.5, p.pressed().gamma_multiply(xt));
+            painter.circle_filled(x_rect.center(), CLOSE * 0.5, p.pressed().gamma_multiply(xt));
         }
         let c = x_rect.center();
         let k = 3.5;
         let stroke = Stroke::new(1.3, p.muted.lerp_to_gamma(p.ink, xt.max(on * 0.6)));
-        ui.painter().line_segment([c + egui::vec2(-k, -k), c + egui::vec2(k, k)], stroke);
-        ui.painter().line_segment([c + egui::vec2(-k, k), c + egui::vec2(k, -k)], stroke);
+        painter.line_segment([c + egui::vec2(-k, -k), c + egui::vec2(k, k)], stroke);
+        painter.line_segment([c + egui::vec2(-k, k), c + egui::vec2(k, -k)], stroke);
         if x.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -755,7 +802,7 @@ fn tab_item(
             closed = true;
         }
     }
-    (resp.clicked() && !closed, closed)
+    (resp.clicked() && !closed, closed, card)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
