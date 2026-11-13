@@ -202,36 +202,33 @@ impl ViewerApp {
 
         // ── System ───────────────────────────────────────────────────────────
         w::section_heading(ui, "System", |_| {});
-        let (title, sub) = if cfg!(target_os = "windows") {
-            ("Open PDFs with PaperView", "Adds PaperView to Explorer's “Open with” list")
+        let is_default = *self.default_status.get_or_insert_with(crate::assoc::is_default);
+        let sub = if is_default {
+            "PDFs and ebooks open with PaperView"
+        } else if cfg!(target_os = "windows") {
+            "Opens Windows' Default apps, where you can choose PaperView"
         } else {
-            (
-                "Open PDFs with PaperView",
-                "Adds PaperView to your app menu and the file manager's “Open with” list",
-            )
+            "Open PDFs and ebooks (EPUB, Kindle, FB2, comics) with PaperView"
         };
-        let mut add = false;
+        let mut make = false;
         let mut remove = false;
-        w::row(ui, false, Some("📄"), title, Some(sub), |ui| {
-            if w::inline_button(ui, "Remove", true).clicked() {
-                remove = true;
-            }
-            if w::inline_button(ui, "Add", true).clicked() {
-                add = true;
+        w::row(ui, false, Some("📄"), "Default app for PDFs and books", Some(sub), |ui| {
+            if is_default {
+                if w::inline_button(ui, "Undo", true).on_hover_text("Remove PaperView from the Open with list").clicked() {
+                    remove = true;
+                }
+            } else if w::primary_button(ui, "Make default", true).clicked() {
+                make = true;
             }
         });
         w::hairline(ui);
-        if add {
-            match crate::assoc::register() {
-                Ok(()) => self.toast(
-                    "Added. Right-click a PDF > Open with > PaperView, and choose it as the default there.",
-                ),
-                Err(e) => self.status = Some(format!("Couldn't add PaperView: {e}")),
-            }
+        if make {
+            self.make_default_app();
         }
         if remove {
             let _ = crate::assoc::unregister();
-            self.toast("Removed PaperView from the Open with list");
+            self.default_status = None;
+            self.toast("PaperView is no longer the default; your system picks another app");
         }
 
         // ── About ────────────────────────────────────────────────────────────
@@ -248,6 +245,61 @@ impl ViewerApp {
         );
         ui.add_space(8.0);
         ui.label(RichText::new(SHORTCUTS).small().color(p.muted));
+    }
+}
+
+impl ViewerApp {
+    pub(super) fn make_default_app(&mut self) {
+        match crate::assoc::make_default() {
+            Ok(()) if cfg!(target_os = "windows") => {
+                self.toast("In Default apps, choose PaperView for .pdf and .epub files")
+            }
+            Ok(()) => self.toast("PaperView now opens your PDFs and ebooks"),
+            Err(e) => self.status = Some(format!("Couldn't make PaperView the default: {e}")),
+        }
+        self.default_status = None;
+    }
+
+    /// Asked once, on first launch: open PDFs and ebooks with PaperView?
+    pub(super) fn first_run_prompt(&mut self, ctx: &egui::Context) {
+        if self.default_asked {
+            return;
+        }
+        let p = theme::palette(self.skin, self.theme.is_dark(ctx));
+        let mut answer: Option<bool> = None;
+        let modal = w::modal("first-run-default", ctx).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new("Open your PDFs and books with PaperView?").text_style(theme::headline()).color(p.ink));
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "PaperView can be the app that opens PDFs and ebooks — EPUB, Kindle (MOBI, AZW3), \
+                     FB2 and comic books — when you double-click them. You can change this any time in \
+                     Settings.",
+                )
+                .color(p.muted),
+            );
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if w::primary_button(ui, "Make PaperView the default", true).clicked() {
+                        answer = Some(true);
+                    }
+                    if w::outlined_button(ui, "Not now", true).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        if let Some(yes) = answer {
+            self.default_asked = true;
+            if yes {
+                self.make_default_app();
+            }
+        }
     }
 }
 

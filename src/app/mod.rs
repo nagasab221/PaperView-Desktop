@@ -16,11 +16,13 @@ use crate::ui::widgets as w;
 
 #[cfg(debug_assertions)]
 mod automate;
+mod books;
 mod chrome;
 mod density;
 mod folders;
 mod library;
 mod peek;
+mod reader;
 mod settings;
 use crate::pdf::{Document, LinkTarget, OpenError, PdfEngine, TocEntry};
 use crate::print::{self, PrintEvent};
@@ -72,6 +74,8 @@ enum ScrollTarget {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum LandingTab {
     Recent,
+    /// Books the reader added (only shown once there are some).
+    Books,
     /// Folders the reader added.
     Folders,
     /// The Backblaze bucket.
@@ -102,6 +106,8 @@ struct Tab {
     title: String,
     path: PathBuf,
     state: Option<Box<DocTab>>,
+    /// A book's reader, parked while its tab is inactive.
+    book: Option<Box<reader::BookView>>,
 }
 
 fn truncate_title(s: &str) -> String {
@@ -466,6 +472,17 @@ pub struct ViewerApp {
     ui_scale_draft: f32,
     library_layout: density::LibraryLayout,
     preview: Option<density::Preview>,
+    /// The open book, when the active tab is one (its state lives inline,
+    /// like a PDF's).
+    book: Option<reader::BookView>,
+    /// Books on the Library's Books tab.
+    books: Vec<books::BookEntry>,
+    book_spread: bool,
+    book_font: f32,
+    /// The first-launch "make PaperView the default?" question was answered.
+    default_asked: bool,
+    /// Whether PaperView is the default PDF app, checked when Settings opens.
+    default_status: Option<bool>,
     /// Where the active tab's card meets the rule under the tab strip.
     active_tab_span: Option<egui::Rangef>,
     /// The sidebar's last open mode, shown while it slides shut.
@@ -577,6 +594,12 @@ impl ViewerApp {
             folder_scan: None,
             sidebar_last: SidebarMode::Thumbs,
             active_tab_span: None,
+            book: None,
+            books: Vec::new(),
+            book_spread: true,
+            book_font: 18.0,
+            default_asked: false,
+            default_status: None,
             ui_scale: 1.0,
             ui_scale_draft: 1.0,
             library_layout: density::LibraryLayout::Covers,
@@ -627,6 +650,16 @@ impl ViewerApp {
             app.ui_scale_draft = app.ui_scale;
             app.library_layout =
                 density::LibraryLayout::from_key(&storage.get_string("library_layout").unwrap_or_default());
+            if let Some(raw) = storage.get_string("books") {
+                app.books = books::decode(&raw);
+            }
+            app.book_spread = storage.get_string("book_spread").as_deref() != Some("0");
+            app.default_asked = storage.get_string("default_asked").as_deref() == Some("1");
+            app.book_font = storage
+                .get_string("book_font")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(18.0f32)
+                .clamp(reader::FONT_MIN, reader::FONT_MAX);
             if let Some(raw) = storage.get_string("folders") {
                 app.folders = folders::decode(&raw);
             }
@@ -652,6 +685,11 @@ impl ViewerApp {
                 app_key: storage.get_string("b2_app_key").unwrap_or_default(),
                 bucket: storage.get_string("b2_bucket").unwrap_or_default(),
             };
+        }
+        // Scripted UI tests skip the first-launch question unless testing it.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("PAPERVIEW_AUTOMATE").is_some() && std::env::var_os("PAPERVIEW_FIRST_RUN").is_none() {
+            app.default_asked = true;
         }
         app.b2_draft = app.cloud_cfg.clone();
         theme::install_fonts(&cc.egui_ctx);
@@ -700,6 +738,10 @@ impl ViewerApp {
     }
 
     fn try_open(&mut self, ctx: &egui::Context, path: &Path, password: Option<&str>, quiet: bool) {
+        if crate::ebook::is_ebook(path) {
+            self.open_book(ctx, path);
+            return;
+        }
         // Already open in a tab? Just switch to it.
         let dedupe_key = path.to_string_lossy().to_string();
         if password.is_none() {
@@ -735,6 +777,7 @@ impl ViewerApp {
                     title: name.clone(),
                     path: path.to_path_buf(),
                     state: None,
+                    book: None,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.page_sizes = Arc::new(doc.page_sizes_pt.clone());
@@ -905,6 +948,15 @@ impl ViewerApp {
     /// Parks the active tab's inline state back into its slot.
     fn stash_active_tab(&mut self) {
         self.peek_leave_doc();
+        if self.book.is_some() {
+            self.save_book_progress();
+            let view = self.book.take().map(Box::new);
+            if let Some(slot) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+                slot.book = view;
+            }
+            self.active_tab = None;
+            return;
+        }
         if self.doc.is_none() {
             self.active_tab = None;
             return;
@@ -953,6 +1005,15 @@ impl ViewerApp {
             return;
         }
         self.stash_active_tab();
+        if let Some(view) = self.tabs[i].book.take() {
+            self.book = Some(*view);
+            self.active_tab = Some(i);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                "{} — PaperView",
+                self.tabs[i].title
+            )));
+            return;
+        }
         let Some(state) = self.tabs[i].state.take() else {
             return;
         };
@@ -998,6 +1059,8 @@ impl ViewerApp {
         }
         if self.active_tab == Some(i) {
             self.peek_leave_doc();
+            self.save_book_progress();
+            self.book = None;
             self.stash_doc_state();
             self.clear_inline_doc();
             self.tabs.remove(i);
@@ -1071,7 +1134,12 @@ impl ViewerApp {
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
-        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]);
+        let mut all = vec!["pdf"];
+        all.extend_from_slice(crate::ebook::EXTENSIONS);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("PDFs and books", &all)
+            .add_filter("PDF documents", &["pdf"])
+            .add_filter("Books", crate::ebook::EXTENSIONS);
         if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
             dialog = dialog.set_directory(dir);
         }
@@ -1790,6 +1858,30 @@ impl ViewerApp {
                 self.close_search();
             }
         }
+        // Books: the same keys turn pages; zoom keys change the type size.
+        if self.book.is_some() && !typing {
+            if let Some(v) = &mut self.book {
+                if k.next || k.space_fwd || k.scroll_lines > 0.0 {
+                    v.next();
+                }
+                if k.prev || k.space_back || k.scroll_lines < 0.0 {
+                    v.prev();
+                }
+                if k.first {
+                    v.first();
+                }
+                if k.last {
+                    v.last();
+                }
+            }
+            if k.zoom_in {
+                self.set_book_font(self.book_font + 1.0);
+            }
+            if k.zoom_out {
+                self.set_book_font(self.book_font - 1.0);
+            }
+            self.save_book_progress();
+        }
         if self.doc.is_none() {
             return;
         }
@@ -2077,13 +2169,20 @@ impl ViewerApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         // Pages sit on the skin's viewport tone; the home view on its paper.
-        let canvas = if self.doc.is_none() { p.background } else { p.viewport };
+        let canvas = if self.doc.is_none() && self.book.is_none() { p.background } else { p.viewport };
         let frame = egui::Frame::NONE.fill(canvas);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if let Some(msg) = &self.engine_error {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new(msg).size(15.0));
                 });
+                return;
+            }
+            if let Some(view) = &mut self.book {
+                let p = w::pal(ui);
+                if view.show(ui, &p) {
+                    self.save_book_progress();
+                }
                 return;
             }
             if self.doc.is_none() {
@@ -2621,6 +2720,7 @@ impl eframe::App for ViewerApp {
         self.password_modal(&ctx);
         self.print_preview_modal(&ctx);
         self.cloud_dialogs(&ctx);
+        self.first_run_prompt(&ctx);
         self.window_edges(&ctx);
         self.title_bar(ui);
         self.top_bar(ui);
@@ -2628,6 +2728,9 @@ impl eframe::App for ViewerApp {
             self.bottom_bar(ui);
             // Always called: it slides itself open and shut.
             self.sidebar_panel(ui);
+        } else if self.book.is_some() {
+            self.book_bar(ui);
+            self.book_sidebar(ui);
         }
         self.central(ui);
         self.overlays(&ctx);
@@ -2667,6 +2770,11 @@ impl eframe::App for ViewerApp {
         storage.set_string("peek_spots", peek::encode_spots(&self.peek.spots));
         storage.set_string("peek_tips", self.peek.tips_shown.to_string());
         storage.set_string("folders", folders::encode(&self.folders));
+        self.save_book_progress();
+        storage.set_string("books", books::encode(&self.books));
+        storage.set_string("book_spread", if self.book_spread { "1" } else { "0" }.to_string());
+        storage.set_string("default_asked", if self.default_asked { "1" } else { "0" }.to_string());
+        storage.set_string("book_font", format!("{:.1}", self.book_font));
         storage.set_string("ui_scale", format!("{:.2}", self.ui_scale));
         storage.set_string("library_layout", self.library_layout.key().to_string());
         storage.set_string("zoom", zoom_to_str(self.zoom));

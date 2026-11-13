@@ -1,6 +1,6 @@
 # PaperView for desktop
 
-**A free PDF reader for your computer. No ads, no accounts.**
+**A free PDF and ebook reader for your computer. No ads, no accounts.**
 
 The desktop companion to the [PaperView Android app](https://github.com/nagasab221/Paperview), with the same look and the same cloud. Runs on **Linux** today; a Windows version is coming.
 
@@ -25,6 +25,12 @@ Made for working through questions while the answers are somewhere else in the d
 3. **Tap Q** to go there, and tap again to come back.
 
 There's an eye button next to the page number that does the same with the mouse: hold it to peek, click it to jump. Each document remembers its own peek spot, and pressing **Shift+Q** again moves it.
+
+### 📕 Ebooks, as an open book
+- Reads **EPUB**, **Kindle** (MOBI, AZW3, AZW, PRC — without DRM), **FB2/FBZ**, **CBZ** comics, plain **TXT** and **HTML**.
+- Two facing pages by default, or one page at a time. Turn pages with the arrow keys, Space, the mouse wheel, or a click on either side.
+- Bigger or smaller text (A− / A+, or Ctrl+= / Ctrl+-), a chapter list, and your place remembered in every book.
+- A **Books** tab appears in the Library once you've added a book, with covers and how far you've read.
 
 ### 📚 Your library
 - All your recent PDFs on a shelf, showing their first page and the page you're on.
@@ -54,7 +60,7 @@ There's no download yet, so for now PaperView is built from the source. It takes
    cargo build --release
    scripts/install-linux.sh
    ```
-3. Open **PaperView** from your app menu. To open PDFs with it from your file manager, right-click a PDF → **Open with** → **PaperView**, and set it as the default there.
+3. Open **PaperView** from your app menu. The first time, it asks whether it should be the app that opens your PDFs and ebooks; you can change that later in **Settings → System**.
 
 **Updating:** `git pull`, `cargo build --release`, then `scripts/install-linux.sh` again. Your library and settings are kept.
 
@@ -88,6 +94,7 @@ Don't want the Cloud tab? Switch it off in Settings.
 | **Ctrl+Shift+T** | Reopen the last closed document |
 | **Ctrl+P** / **Ctrl+S** | Print / save a copy |
 | **Ctrl+,** | Settings |
+| **← / →**, **Space**, **PgUp / PgDn** | In a book: previous / next page |
 
 ---
 

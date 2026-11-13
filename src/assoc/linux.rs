@@ -58,7 +58,7 @@ pub fn register() -> Result<(), String> {
          Icon={ICON_NAME}\n\
          Terminal=false\n\
          Categories=Office;Viewer;\n\
-         MimeType=application/pdf;\n\
+         MimeType=application/pdf;application/epub+zip;application/x-mobipocket-ebook;application/vnd.amazon.ebook;application/x-fictionbook+xml;application/vnd.comicbook+zip;\n\
          Keywords=pdf;document;reader;viewer;\n\
          StartupWMClass=paperview\n",
         exec_quote(exe),
@@ -68,6 +68,42 @@ pub fn register() -> Result<(), String> {
     std::fs::write(&path, entry).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
     refresh();
     Ok(())
+}
+
+/// The file types PaperView opens: PDFs and ebooks.
+pub const MIME_TYPES: &[&str] = &[
+    "application/pdf",
+    "application/epub+zip",
+    "application/x-mobipocket-ebook",
+    "application/vnd.amazon.ebook",
+    "application/x-fictionbook+xml",
+    "application/vnd.comicbook+zip",
+];
+
+/// Registers PaperView and makes it the default app for PDFs and ebooks
+/// (written to `mimeapps.list`, which KDE, GNOME and others all follow).
+pub fn make_default() -> Result<(), String> {
+    register()?;
+    let status = Command::new("xdg-mime")
+        .arg("default")
+        .arg(DESKTOP_FILE)
+        .args(MIME_TYPES)
+        .status()
+        .map_err(|e| format!("Couldn't run xdg-mime: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("xdg-mime couldn't set the default apps".into())
+    }
+}
+
+/// Whether PDFs open with PaperView by default.
+pub fn is_default() -> bool {
+    Command::new("xdg-mime")
+        .args(["query", "default", "application/pdf"])
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == DESKTOP_FILE)
 }
 
 /// Removes the registration (safe to call when not registered).

@@ -1,6 +1,6 @@
 [package]
 name = "paperview"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "PaperView: a lightweight, fast-starting PDF reader for Linux and Windows"
 
@@ -27,6 +27,9 @@ serde_json = "1"
 sha1 = "0.10"
 # Library covers are cached on disk as PNG (already in the tree via eframe).
 png = "0.18"
+# Ebooks: EPUB / CBZ / FBZ are zip archives; their images need decoding.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 # Win32 window handle for parenting the print dialog (matches eframe/winit).
 raw-window-handle = "0.6"

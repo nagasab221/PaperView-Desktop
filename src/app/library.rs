@@ -139,6 +139,9 @@ impl ViewerApp {
     /// added, Cloud once a bucket is set up and switched on.
     fn library_tabs(&self) -> Vec<(&'static str, LandingTab)> {
         let mut tabs = vec![("Recents", LandingTab::Recent)];
+        if !self.books.is_empty() {
+            tabs.push(("Books", LandingTab::Books));
+        }
         if !self.folders.is_empty() {
             tabs.push(("Folders", LandingTab::Folders));
         }
@@ -156,6 +159,10 @@ impl ViewerApp {
         }
         let subtitle = match self.landing_tab {
             LandingTab::Saved => self.cloud_cfg.bucket.trim().to_string(),
+            LandingTab::Books => {
+                let n = self.books.len();
+                format!("{n} book{}", if n == 1 { "" } else { "s" })
+            }
             LandingTab::Folders => {
                 let n = self.folders.len();
                 let docs: usize = self.folder_listings.iter().map(|l| l.docs.len()).sum();
@@ -223,6 +230,7 @@ impl ViewerApp {
             w::fade_in(ui, "library-tab", tab);
             match tab {
                 LandingTab::Saved => self.cloud_page(ui, &ctx),
+                LandingTab::Books => self.books_shelf(ui, &ctx),
                 LandingTab::Folders => self.folders_page(ui, &ctx),
                 LandingTab::Recent => self.recents_shelf(ui, &ctx),
             }
@@ -257,6 +265,35 @@ impl ViewerApp {
         }
         if let Some(p) = open {
             self.open_path(ctx, &p);
+        }
+    }
+
+    // ── Books ────────────────────────────────────────────────────────────────
+
+    fn books_shelf(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut add = false;
+        w::section_heading(ui, "Your books", |ui| {
+            if w::inline_button(ui, "Add books…", true).clicked() {
+                add = true;
+            }
+        });
+        if add {
+            self.pick_books();
+        }
+        ui.add_space(14.0);
+        let tiles: Vec<Tile> = self
+            .books
+            .iter()
+            .map(|b| Tile { path: b.path.clone(), when: b.ts, removable: true })
+            .collect();
+        let (open, remove) = self.shelf(ui, ctx, &tiles);
+        if let Some(i) = remove {
+            if i < self.books.len() {
+                self.books.remove(i);
+            }
+        }
+        if let Some(path) = open {
+            self.open_book(ctx, &path);
         }
     }
 
@@ -384,6 +421,17 @@ impl ViewerApp {
     fn caption(&self, tile: &Tile, exists: bool) -> String {
         if !exists {
             return "File moved or deleted".to_string();
+        }
+        if let Some(b) = self.books.iter().find(|b| b.path == tile.path) {
+            let progress = if b.progress > 0.005 {
+                format!("{:.0}%", (b.progress * 100.0).max(1.0))
+            } else {
+                "Not started".to_string()
+            };
+            return match &b.author {
+                Some(a) => format!("{progress} · {a}"),
+                None => progress,
+            };
         }
         match self.recents.iter().find(|r| r.path == tile.path) {
             Some(r) => format!("page {} · {}", r.page + 1, fmt_date(r.ts)),
@@ -522,10 +570,17 @@ impl ViewerApp {
         let p = w::pal(ui);
         let path = tile.path.as_path();
         let exists = self.covers.exists(ctx, path);
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        let name = self
+            .books
+            .iter()
+            .find(|b| b.path == path)
+            .map(|b| b.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            });
         let mut open = false;
         let mut remove = false;
 
@@ -554,6 +609,20 @@ impl ViewerApp {
                     Some(Cover::Ready(tex)) => {
                         let uv = cover_uv(tex.size(), COVER_ASPECT);
                         painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
+                    }
+                    _ if exists && crate::ebook::is_ebook(path) => {
+                        // A typeset cover: the title in serif on tinted paper.
+                        painter.rect_filled(rect, 0, p.accent_wash());
+                        let inner = rect.shrink(10.0);
+                        painter.rect_stroke(inner, 0, Stroke::new(1.0, p.accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+                        let galley = painter.layout(
+                            name.clone(),
+                            egui::FontId::new((tile_w / 9.0).clamp(12.0, 19.0), theme::serif()),
+                            p.ink,
+                            inner.width() - 16.0,
+                        );
+                        let pos = egui::pos2(inner.center().x - galley.size().x / 2.0, inner.top() + inner.height() * 0.28);
+                        painter.galley(pos, galley, p.ink);
                     }
                     _ => {
                         painter.text(

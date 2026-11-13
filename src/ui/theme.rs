@@ -274,6 +274,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut serif_list = vec!["noto-serif".to_string(), "noto-sans".to_string()];
     serif_list.extend(fallbacks.iter().cloned());
     fonts.families.insert(serif(), serif_list);
+    // Book text needs real bold and italic faces, not synthesised ones.
+    for (family, file) in [
+        ("serif-bold", &include_bytes!("../../assets/fonts/NotoSerif-Bold.ttf")[..]),
+        ("serif-italic", &include_bytes!("../../assets/fonts/NotoSerif-Italic.ttf")[..]),
+        ("serif-bolditalic", &include_bytes!("../../assets/fonts/NotoSerif-BoldItalic.ttf")[..]),
+    ] {
+        fonts.font_data.insert(family.into(), FontData::from_static(file).into());
+        let mut list = vec![family.to_string(), "noto-serif".to_string(), "noto-sans".to_string()];
+        list.extend(fallbacks.iter().cloned());
+        fonts.families.insert(FontFamily::Name(family.into()), list);
+    }
     ctx.set_fonts(fonts);
 }
 

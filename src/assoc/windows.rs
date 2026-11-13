@@ -79,3 +79,20 @@ fn notify_shell() {
         SHChangeNotify(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null());
     }
 }
+
+/// Windows doesn't let programs make themselves the default: register, then
+/// open Settings > Default apps so the reader can pick PaperView there.
+pub fn make_default() -> Result<(), String> {
+    register()?;
+    Command::new("cmd")
+        .args(["/C", "start", "ms-settings:defaultapps"])
+        .creation_flags(NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("Couldn't open Default apps: {e}"))?;
+    Ok(())
+}
+
+/// Not reliably knowable on Windows (the choice is hashed); assume not.
+pub fn is_default() -> bool {
+    false
+}

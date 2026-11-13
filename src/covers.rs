@@ -179,6 +179,17 @@ fn produce(engine: PdfEngine, key: &Key, want_pixels: bool) -> Option<(usize, us
             return Some(px);
         }
     }
+    // Books: their cover image (or a comic's first page), scaled to size.
+    if crate::ebook::is_ebook(&key.path) {
+        let bytes = crate::ebook::cover(&key.path)?;
+        let img = image::load_from_memory(&bytes).ok()?;
+        let h = (img.height() as u64 * COVER_PX as u64 / img.width().max(1) as u64).max(1) as u32;
+        let rgba = img.resize_exact(COVER_PX as u32, h, image::imageops::FilterType::Triangle).to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        let px = rgba.into_raw();
+        let _ = save_png(&file, w, h, &px);
+        return Some((w, h, px));
+    }
     let doc = engine.open(&key.path, None).ok()?;
     let r = doc.render_page(0, COVER_PX, 0).ok()?;
     let _ = save_png(&file, r.width, r.height, &r.rgba);

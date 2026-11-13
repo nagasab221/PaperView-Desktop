@@ -4,12 +4,12 @@
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
-pub use windows::{register, unregister};
+pub use windows::{is_default, make_default, register, unregister};
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{register, unregister};
+pub use linux::{is_default, make_default, register, unregister};
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn register() -> Result<(), String> {
@@ -19,4 +19,14 @@ pub fn register() -> Result<(), String> {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn unregister() -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn make_default() -> Result<(), String> {
+    Err("Setting the default app isn't supported on this platform".into())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn is_default() -> bool {
+    false
 }

@@ -40,10 +40,10 @@ impl ViewerApp {
         let ctx = ui.ctx().clone();
         let p = w::pal(ui);
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        let title = self
-            .active_tab
-            .and_then(|i| self.tabs.get(i))
-            .map(|t| t.title.clone());
+        let title = match &self.book {
+            Some(v) => Some(v.title.clone()),
+            None => self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.title.clone()),
+        };
         let fill = if self.tabs.is_empty() { p.background } else { p.tray() };
         egui::Panel::top("titlebar")
             .exact_size(TITLE_H)
@@ -220,6 +220,12 @@ impl ViewerApp {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
+                        if self.book.is_some() {
+                            let open = self.sidebar != SidebarMode::Hidden;
+                            if w::icon_button(ui, "📖", "Contents", open).clicked() {
+                                self.sidebar = if open { SidebarMode::Hidden } else { SidebarMode::Toc };
+                            }
+                        }
                         if self.doc.is_some() {
                             if w::icon_button(ui, "🔍", "Find in document (Ctrl+F)", self.search_open)
                                 .clicked()
@@ -446,7 +452,36 @@ impl ViewerApp {
                     ui.close();
                     self.close_doc(ctx);
                 }
-            } else if ui.add(item("Open a PDF…", "Ctrl+O")).clicked() {
+            } else if self.book.is_some() {
+                if ui.add(item(if self.book_spread { "One page at a time" } else { "Two pages" }, "")).clicked() {
+                    self.set_book_spread(!self.book_spread);
+                    ui.close();
+                }
+                if ui.add(item("Larger text", "Ctrl+=")).clicked() {
+                    self.set_book_font(self.book_font + 1.0);
+                    ui.close();
+                }
+                if ui.add(item("Smaller text", "Ctrl+-")).clicked() {
+                    self.set_book_font(self.book_font - 1.0);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.add(item("Show in folder", "")).clicked() {
+                    if let Some(path) = self.book.as_ref().map(|v| v.path.clone()) {
+                        open_file_location(&path);
+                    }
+                    ui.close();
+                }
+                if ui.add(item("Close book", "Ctrl+W")).clicked() {
+                    ui.close();
+                    self.close_doc(ctx);
+                }
+                ui.separator();
+                if ui.add(item("Open a PDF or book…", "Ctrl+O")).clicked() {
+                    ui.close();
+                    self.open_dialog(ctx);
+                }
+            } else if ui.add(item("Open a PDF or book…", "Ctrl+O")).clicked() {
                 ui.close();
                 self.open_dialog(ctx);
             }
