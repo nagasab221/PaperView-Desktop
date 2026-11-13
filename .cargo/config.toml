@@ -1,0 +1,23 @@
+# ── GNU-toolchain link setup (this machine has no MSVC) ──────────────────────
+# The windows-* crates use `#[link(kind = "raw-dylib")]`, for which rustc
+# shells out to `dlltool.exe`. Rustup's windows-gnu toolchain bundles a dlltool
+# but NOT the GNU assembler (`as.exe`) it silently spawns — on a machine
+# without binutils it dies with a bare "CreateProcess" error. (Do not
+# substitute llvm-dlltool: its short-import objects mixed with MinGW-style
+# import libs make GNU ld emit a corrupt import-descriptor table, and the
+# binaries segfault before main().)
+#
+# Fix: a real GNU binutils dlltool+as pair in ~/.cargo/gnu-binutils, taken
+# from the MSYS2 packages (binutils, gettext-runtime, libiconv, zlib, zstd —
+# just the exes + their DLLs, no MSYS2 install).
+#
+# ~/.cargo/gnu-import-libs carries libshlwapi.a, generated from the system
+# DLL's export table because rustup's self-contained MinGW omits it (the
+# `webbrowser` crate links it). See README "Notes for the GNU toolchain".
+#
+# MSVC builds never read this section.
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "dlltool=C:/Users/fabri/.cargo/gnu-binutils/dlltool.exe",
+    "-L", "C:/Users/fabri/.cargo/gnu-import-libs",
+]

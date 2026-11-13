@@ -1,0 +1,3464 @@
+//! The egui application: toolbar, page views, thumbnails, search, input.
+
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use eframe::egui;
+
+use eframe::egui::scroll_area::ScrollSource;
+
+use crate::cloud::{self, B2Config, CloudEvent, CloudFile, CloudOp};
+use crate::pdf::{Document, LinkTarget, OpenError, PdfEngine, TocEntry};
+use crate::print::{self, PrintEvent};
+use crate::search::SearchState;
+use crate::view::{self, Layout, TexCache, MAX_TEXTURE_DIM, PAGE_GAP, PX_PER_PT};
+
+const MIN_ZOOM: f32 = 0.10;
+const MAX_ZOOM: f32 = 6.0;
+/// Thumbnail width in logical px (sidebar).
+const THUMB_W: f32 = 118.0;
+/// Minimum interval between wheel-driven page flips in single-page mode.
+const EDGE_FLIP_COOLDOWN: Duration = Duration::from_millis(300);
+/// How long after the last zoom change we keep stretching stale textures
+/// before re-rendering at the final resolution.
+const ZOOM_SETTLE: Duration = Duration::from_millis(140);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Zoom {
+    FitWidth,
+    FitPage,
+    Custom(f32),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ViewMode {
+    Single,
+    Continuous,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ThemeChoice {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy)]
+enum ScrollTarget {
+    PageTop(i32),
+    PageBottom(i32),
+    /// (page, hit index on that page)
+    Hit(i32, usize),
+    /// Absolute scroll offset (tab-switch restore).
+    Offset(egui::Vec2),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LandingTab {
+    Recent,
+    Saved,
+}
+
+/// One open document's complete state, parked while its tab is inactive.
+struct DocTab {
+    doc: Document,
+    page_sizes: Arc<Vec<(f32, f32)>>,
+    page_index: i32,
+    zoom: Zoom,
+    effective_zoom: f32,
+    rotation: u8,
+    search: SearchState,
+    selection: Option<((i32, i32), (i32, i32))>,
+    text_counts: std::collections::HashMap<i32, i32>,
+    toc: Vec<TocEntry>,
+    back_stack: Vec<i32>,
+    fwd_stack: Vec<i32>,
+    doc_password: Option<String>,
+    saved_offset: egui::Vec2,
+}
+
+/// A tab in the strip. The active tab's state lives inline in `ViewerApp`
+/// (its `state` here is `None`); inactive tabs park it in `state`.
+struct Tab {
+    title: String,
+    path: PathBuf,
+    state: Option<Box<DocTab>>,
+}
+
+fn truncate_title(s: &str) -> String {
+    const MAX: usize = 22;
+    let mut out: String = s.chars().take(MAX).collect();
+    if s.chars().count() > MAX {
+        out.push('…');
+    }
+    out
+}
+
+fn fix_active_after_remove(active: Option<usize>, removed: usize) -> Option<usize> {
+    match active {
+        Some(a) if a > removed => Some(a - 1),
+        Some(a) if a == removed => None,
+        other => other,
+    }
+}
+
+/// A print job between the system dialog and the user's confirmation.
+struct PrintPreviewState {
+    ticket: Option<print::PrintTicket>,
+    path: PathBuf,
+    doc_name: String,
+    /// Currently previewed page (within ticket.from..=ticket.to).
+    page: i32,
+    tex: Option<egui::TextureHandle>,
+    tex_page: i32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarMode {
+    Hidden,
+    Thumbs,
+    Toc,
+}
+
+/// One recently-opened file, with its remembered reading state.
+#[derive(Clone)]
+struct Recent {
+    path: PathBuf,
+    /// Unix seconds of the last open.
+    ts: i64,
+    page: i32,
+    zoom: Zoom,
+    rotation: u8,
+}
+
+const MAX_RECENTS: usize = 20;
+
+fn zoom_to_str(z: Zoom) -> String {
+    match z {
+        Zoom::FitWidth => "fitw".to_string(),
+        Zoom::FitPage => "fitp".to_string(),
+        Zoom::Custom(v) => format!("custom:{v}"),
+    }
+}
+
+fn zoom_from_str(s: &str) -> Zoom {
+    match s {
+        "fitw" => Zoom::FitWidth,
+        "fitp" => Zoom::FitPage,
+        other => other
+            .strip_prefix("custom:")
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(|v| Zoom::Custom(v.clamp(MIN_ZOOM, MAX_ZOOM)))
+            .unwrap_or(Zoom::FitPage),
+    }
+}
+
+fn encode_recents(list: &[Recent]) -> String {
+    list.iter()
+        .map(|r| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                r.ts,
+                r.page,
+                zoom_to_str(r.zoom),
+                r.rotation,
+                r.path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_recents(s: &str) -> Vec<Recent> {
+    s.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.splitn(5, '\t').collect();
+            match fields.as_slice() {
+                // v2: ts, page, zoom, rotation, path
+                [ts, page, zoom, rot, path] if !path.is_empty() => Some(Recent {
+                    path: PathBuf::from(path),
+                    ts: ts.parse().ok()?,
+                    page: page.parse().unwrap_or(0),
+                    zoom: zoom_from_str(zoom),
+                    rotation: rot.parse().unwrap_or(0),
+                }),
+                // v1: ts, path
+                [ts, path] if !path.is_empty() => Some(Recent {
+                    path: PathBuf::from(path),
+                    ts: ts.parse().ok()?,
+                    page: 0,
+                    zoom: Zoom::FitPage,
+                    rotation: 0,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn now_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn fmt_ts(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%d %b %Y, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn fmt_time(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|utc| utc.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+fn fmt_speed(bps: f64) -> String {
+    format!("{}/s", cloud::fmt_size(bps.max(0.0) as u64))
+}
+
+/// Backblaze B2's free-tier allowance (10 GB), used for the "space left"
+/// stat on the Saved tab.  If you use a different bucket quota, change
+/// this constant.
+const FREE_TIER_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Auto-save decision: at/below the limit, not from the cloud cache, and not
+/// already saved with the same name+size.
+fn should_auto_save(limit_mb: u32, size: u64, from_cache: bool, already: bool) -> bool {
+    !from_cache && !already && size <= (limit_mb as u64) * 1024 * 1024
+}
+
+/// Maps a rect from page space (unrotated, top-left origin, points) into view
+/// space after `rot` quarter-turns clockwise. (w, h) is the unrotated page.
+fn rect_to_view(hr: crate::pdf::HitRect, rot: u8, w: f32, h: f32) -> crate::pdf::HitRect {
+    use crate::pdf::HitRect as R;
+    match rot % 4 {
+        1 => R {
+            x: h - hr.y - hr.h,
+            y: hr.x,
+            w: hr.h,
+            h: hr.w,
+        },
+        2 => R {
+            x: w - hr.x - hr.w,
+            y: h - hr.y - hr.h,
+            w: hr.w,
+            h: hr.h,
+        },
+        3 => R {
+            x: hr.y,
+            y: w - hr.x - hr.w,
+            w: hr.h,
+            h: hr.w,
+        },
+        _ => hr,
+    }
+}
+
+/// Maps a point from view space back into page space (inverse of the above).
+fn point_to_page(v: egui::Vec2, rot: u8, w: f32, h: f32) -> egui::Vec2 {
+    match rot % 4 {
+        1 => egui::vec2(v.y, h - v.x),
+        2 => egui::vec2(w - v.x, h - v.y),
+        3 => egui::vec2(w - v.y, v.x),
+        _ => v,
+    }
+}
+
+/// Reveals a file in Explorer (Windows only).
+#[cfg(target_os = "windows")]
+fn open_file_location(path: &Path) {
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_file_location(_path: &Path) {}
+
+pub struct ViewerApp {
+    engine: Option<PdfEngine>,
+    engine_error: Option<String>,
+    doc: Option<Document>,
+    /// Copy of the per-page sizes, so layout math never borrows `doc`.
+    page_sizes: Arc<Vec<(f32, f32)>>,
+    page_index: i32,
+    zoom: Zoom,
+    /// Zoom actually applied last frame (fit modes resolve to a number here).
+    effective_zoom: f32,
+    mode: ViewMode,
+    cache: TexCache,
+    thumb_cache: TexCache,
+    sidebar: SidebarMode,
+    /// Document outline, flattened.
+    toc: Vec<TocEntry>,
+    /// Jump history for Alt+Left / Alt+Right.
+    back_stack: Vec<i32>,
+    fwd_stack: Vec<i32>,
+    /// Keyboard scroll to apply this frame (logical px, + = down).
+    pending_scroll: f32,
+    /// Whether the single-page view sat at its bottom/top edge last frame.
+    last_at_bottom: bool,
+    last_at_top: bool,
+    /// Password dialog state: (path, entered text, previous attempt failed).
+    password_prompt: Option<(PathBuf, String, bool)>,
+    /// Last link probe under the pointer: (position, page, target).
+    last_link_probe: Option<(egui::Pos2, Option<LinkTarget>)>,
+    /// Password the open document was unlocked with (for reopen/print).
+    doc_password: Option<String>,
+    /// Main window handle (Win32), for parenting the print dialog.
+    hwnd: isize,
+    printing: bool,
+    print_rx: Option<std::sync::mpsc::Receiver<PrintEvent>>,
+    /// Pending print job awaiting preview confirmation.
+    print_preview: Option<PrintPreviewState>,
+    /// Open documents; the active one's state lives inline.
+    tabs: Vec<Tab>,
+    active_tab: Option<usize>,
+    /// Auto-save opened PDFs to the cloud when at/below the size limit.
+    auto_save: bool,
+    auto_save_mb: u32,
+    theme: ThemeChoice,
+    search: SearchState,
+    focus_search: bool,
+    page_field: String,
+    status: Option<String>,
+    scroll_to: Option<ScrollTarget>,
+    /// Scroll offset of the page view last frame (for zoom anchoring).
+    last_offset: egui::Vec2,
+    /// Screen rect of the page view last frame (for pointer anchoring).
+    central_rect: egui::Rect,
+    /// Effective zoom before a pending zoom change, for anchor math.
+    zoom_prev_effective: Option<f32>,
+    /// Pointer position (relative to the view) a zoom change centers on.
+    zoom_anchor: Option<egui::Vec2>,
+    /// While in the future, zoom is "in motion": stretch stale textures.
+    zoom_gesture_until: Option<Instant>,
+    /// Raw (non-ctrl) wheel delta this frame, for edge page-flips.
+    wheel_y: f32,
+    last_edge_flip: Option<Instant>,
+    /// Text selection: ((page, char), (page, char)) — anchor and head, in
+    /// gesture order (normalize with `sel_ordered`).
+    selection: Option<((i32, i32), (i32, i32))>,
+    /// True while a selection drag is in progress.
+    selecting: bool,
+    /// Cached highlight rects per page for the *current* selection.
+    sel_rects: std::collections::HashMap<i32, Vec<crate::pdf::HitRect>>,
+    /// Cached char count per page.
+    text_counts: std::collections::HashMap<i32, i32>,
+    /// Last pointer hit-test result, to avoid re-querying PDFium every frame.
+    last_hit_test: Option<(egui::Pos2, (i32, i32))>,
+    // Landing page
+    recents: Vec<Recent>,
+    landing_tab: LandingTab,
+    // Cloud (Backblaze B2)
+    cloud_cfg: B2Config,
+    cloud_files: Vec<CloudFile>,
+    cloud_status: Option<String>,
+    cloud_busy: bool,
+    cloud_listed: bool,
+    show_cloud_settings: bool,
+    cloud_rx: Option<std::sync::mpsc::Receiver<CloudEvent>>,
+    /// Live transfer progress: (done, total, bytes/sec).
+    cloud_progress: Option<(u64, u64, f64)>,
+    /// Last measured speeds: (bytes/sec, unix ts).
+    cloud_last_dl: Option<(f64, i64)>,
+    cloud_last_ul: Option<(f64, i64)>,
+    /// When the file list was last refreshed (unix ts).
+    cloud_refreshed: Option<i64>,
+    /// Local download-cache footprint: (files, bytes).
+    cloud_cache: (usize, u64),
+    /// Queued cloud ops (one runs at a time).
+    cloud_queue: VecDeque<CloudOp>,
+    /// Names selected in the Saved tab for batch actions.
+    cloud_selected: HashSet<String>,
+    /// Two-step delete confirmation deadline.
+    confirm_delete_until: Option<Instant>,
+    /// View rotation for the whole document, quarter turns clockwise.
+    rotation: u8,
+    /// Recently closed tabs, most recent last: (path, password).
+    closed_tabs: Vec<(PathBuf, Option<String>)>,
+    #[cfg(debug_assertions)]
+    announced_first_frame: bool,
+    /// Tracks whether we've shown the window yet (avoids startup flash).
+    shown: bool,
+    /// Frame counter used to defer Visible(true) until the second frame.
+    frame_nr: u8,
+}
+
+impl ViewerApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_file: Option<PathBuf>,
+    ) -> Self {
+        // Ctrl+= / Ctrl+- should zoom the *document*, not the whole UI.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+
+        let (engine, engine_error) = match PdfEngine::new() {
+            Ok(engine) => (Some(engine), None),
+            Err(msg) => (None, Some(msg)),
+        };
+
+        let mut app = Self {
+            engine,
+            engine_error,
+            doc: None,
+            page_sizes: Arc::new(Vec::new()),
+            page_index: 0,
+            zoom: Zoom::FitPage,
+            effective_zoom: 1.0,
+            mode: ViewMode::Continuous,
+            cache: TexCache::default(),
+            thumb_cache: TexCache::default(),
+            sidebar: SidebarMode::Hidden,
+            toc: Vec::new(),
+            back_stack: Vec::new(),
+            fwd_stack: Vec::new(),
+            pending_scroll: 0.0,
+            last_at_bottom: false,
+            last_at_top: false,
+            password_prompt: None,
+            last_link_probe: None,
+            doc_password: None,
+            hwnd: 0,
+            printing: false,
+            print_rx: None,
+            print_preview: None,
+            tabs: Vec::new(),
+            active_tab: None,
+            auto_save: true,
+            auto_save_mb: 20,
+            theme: ThemeChoice::System,
+            search: SearchState::default(),
+            focus_search: false,
+            page_field: String::new(),
+            status: None,
+            scroll_to: None,
+            last_offset: egui::Vec2::ZERO,
+            central_rect: egui::Rect::NOTHING,
+            zoom_prev_effective: None,
+            zoom_anchor: None,
+            zoom_gesture_until: None,
+            wheel_y: 0.0,
+            last_edge_flip: None,
+            selection: None,
+            selecting: false,
+            sel_rects: std::collections::HashMap::new(),
+            text_counts: std::collections::HashMap::new(),
+            last_hit_test: None,
+            recents: Vec::new(),
+            landing_tab: LandingTab::Recent,
+            cloud_cfg: B2Config::default(),
+            cloud_files: Vec::new(),
+            cloud_status: None,
+            cloud_busy: false,
+            cloud_listed: false,
+            show_cloud_settings: false,
+            cloud_rx: None,
+            cloud_progress: None,
+            cloud_last_dl: None,
+            cloud_last_ul: None,
+            cloud_refreshed: None,
+            cloud_cache: (0, 0),
+            cloud_queue: VecDeque::new(),
+            cloud_selected: HashSet::new(),
+            confirm_delete_until: None,
+            rotation: 0,
+            closed_tabs: Vec::new(),
+            #[cfg(debug_assertions)]
+            announced_first_frame: false,
+            shown: false,
+            frame_nr: 0,
+        };
+
+        // Restore session preferences.
+        let mut last_file = None;
+        if let Some(storage) = cc.storage {
+            if let Some(v) = storage.get_string("mode") {
+                app.mode = if v == "single" {
+                    ViewMode::Single
+                } else {
+                    ViewMode::Continuous
+                };
+            }
+            app.sidebar = match storage.get_string("sidebar").as_deref() {
+                Some("thumbs") => SidebarMode::Thumbs,
+                Some("toc") => SidebarMode::Toc,
+                Some("hidden") => SidebarMode::Hidden,
+                // migrate the old boolean key
+                _ => {
+                    if storage.get_string("thumbs").as_deref() == Some("1") {
+                        SidebarMode::Thumbs
+                    } else {
+                        SidebarMode::Hidden
+                    }
+                }
+            };
+            app.theme = match storage.get_string("theme").as_deref() {
+                Some("light") => ThemeChoice::Light,
+                Some("dark") => ThemeChoice::Dark,
+                _ => ThemeChoice::System,
+            };
+            match app.theme {
+                ThemeChoice::Light => cc.egui_ctx.set_theme(egui::ThemePreference::Light),
+                ThemeChoice::Dark => cc.egui_ctx.set_theme(egui::ThemePreference::Dark),
+                ThemeChoice::System => {}
+            }
+            if let Some(z) = storage.get_string("zoom") {
+                app.zoom = zoom_from_str(&z);
+            }
+            app.auto_save = storage.get_string("auto_save").as_deref() != Some("0");
+            app.auto_save_mb = storage
+                .get_string("auto_save_mb")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20)
+                .clamp(1, 500);
+            last_file = storage.get_string("last_file").map(PathBuf::from);
+            if let Some(r) = storage.get_string("recents") {
+                app.recents = decode_recents(&r);
+            }
+            app.cloud_cfg = B2Config {
+                key_id: storage.get_string("b2_key_id").unwrap_or_default(),
+                app_key: storage.get_string("b2_app_key").unwrap_or_default(),
+                bucket: storage.get_string("b2_bucket").unwrap_or_default(),
+            };
+        }
+        // Migrate the pre-landing-page "last file" into the recents list.
+        if app.recents.is_empty() {
+            if let Some(p) = last_file.filter(|p| p.exists()) {
+                app.recents.push(Recent {
+                    path: p,
+                    ts: now_ts(),
+                    page: 0,
+                    zoom: Zoom::FitWidth,
+                    rotation: 0,
+                });
+            }
+        }
+
+        // Know the cloud listing early: auto-save needs it to skip files
+        // that are already up there.
+        if app.cloud_cfg.ready() {
+            app.start_cloud_op(&cc.egui_ctx, CloudOp::List);
+        }
+
+        if let Some(path) = initial_file {
+            // A directly-launched PDF skips the landing page (and session
+            // restore — it gets exactly the file that was asked for).
+            app.open_path(&cc.egui_ctx, &path);
+        } else {
+            // Restore last session's tabs, parked; the landing page shows.
+            let restore: Vec<PathBuf> = cc
+                .storage
+                .and_then(|s| s.get_string("open_tabs"))
+                .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+                .unwrap_or_default();
+            for path in restore.iter().take(8).filter(|p| p.exists()) {
+                app.try_open(&cc.egui_ctx, path, None, true);
+            }
+            app.go_home(&cc.egui_ctx);
+        }
+        app
+    }
+
+    fn open_path(&mut self, ctx: &egui::Context, path: &Path) {
+        self.try_open(ctx, path, None, false);
+    }
+
+    fn try_open(&mut self, ctx: &egui::Context, path: &Path, password: Option<&str>, quiet: bool) {
+        // Already open in a tab? Just switch to it.
+        let dedupe_key = path.to_string_lossy().to_string();
+        if password.is_none() {
+            if let Some(i) = self
+                .tabs
+                .iter()
+                .position(|t| t.path.to_string_lossy().eq_ignore_ascii_case(&dedupe_key))
+            {
+                self.activate_tab(ctx, i);
+                return;
+            }
+        }
+        let Some(engine) = &self.engine else { return };
+        match engine.open(path, password) {
+            Ok(doc) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "paperview: loaded {} ({} pages)",
+                    doc.path.display(),
+                    doc.page_count()
+                );
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{name} — PaperView"
+                )));
+                // Park the outgoing tab, then install this document as a
+                // new tab whose state lives inline.
+                self.stash_active_tab();
+                self.tabs.push(Tab {
+                    title: name.clone(),
+                    path: path.to_path_buf(),
+                    state: None,
+                });
+                self.active_tab = Some(self.tabs.len() - 1);
+                self.page_sizes = Arc::new(doc.page_sizes_pt.clone());
+                self.toc = doc.toc();
+                self.doc = Some(doc);
+                self.cache.clear();
+                self.thumb_cache.clear();
+                self.search.deactivate();
+                self.set_selection(None);
+                self.text_counts.clear();
+                self.back_stack.clear();
+                self.fwd_stack.clear();
+                self.password_prompt = None;
+                self.status = None;
+                // Restore this file's remembered state (Sumatra-style).
+                let key = path.to_string_lossy().to_string();
+                let remembered = self
+                    .recents
+                    .iter()
+                    .find(|r| r.path.to_string_lossy().eq_ignore_ascii_case(&key))
+                    .map(|r| (r.page, r.zoom, r.rotation));
+                // Unknown files start at the default zoom (fit page).
+                let (page, zoom, rotation) = remembered.unwrap_or((0, Zoom::FitPage, 0));
+                self.page_index = page.clamp(0, self.page_count().saturating_sub(1).max(0));
+                self.zoom = zoom;
+                self.rotation = rotation % 4;
+                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+                self.doc_password = password.map(|s| s.to_string());
+                if !quiet {
+                    // Bump the recents list, carrying the state forward.
+                    self.recents
+                        .retain(|r| !r.path.to_string_lossy().eq_ignore_ascii_case(&key));
+                    self.recents.insert(
+                        0,
+                        Recent {
+                            path: path.to_path_buf(),
+                            ts: now_ts(),
+                            page: self.page_index,
+                            zoom: self.zoom,
+                            rotation: self.rotation,
+                        },
+                    );
+                    self.recents.truncate(MAX_RECENTS);
+                    self.maybe_auto_save(ctx, path);
+                }
+            }
+            Err(OpenError::PasswordRequired) => {
+                if !quiet {
+                    self.password_prompt =
+                        Some((path.to_path_buf(), String::new(), password.is_some()));
+                }
+            }
+            Err(OpenError::Message(msg)) => {
+                if !quiet {
+                    self.status = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Queues a cloud upload of a just-opened file when auto-save applies.
+    fn maybe_auto_save(&mut self, ctx: &egui::Context, path: &Path) {
+        if !self.auto_save || !self.cloud_cfg.ready() {
+            return;
+        }
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
+        let from_cache = path.starts_with(cloud::cache_dir());
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let already = self
+            .cloud_files
+            .iter()
+            .any(|f| f.name == name && f.size == size);
+        if should_auto_save(self.auto_save_mb, size, from_cache, already) {
+            self.status = Some(format!("Auto-saving {name} to cloud…"));
+            self.start_cloud_op(ctx, CloudOp::Upload(path.to_path_buf()));
+        }
+    }
+
+    /// Writes the open document's page/zoom/rotation into its recents entry.
+    fn stash_doc_state(&mut self) {
+        let Some(path) = self.doc.as_ref().map(|d| d.path.to_string_lossy().to_string())
+        else {
+            return;
+        };
+        let (page, zoom, rotation) = (self.page_index, self.zoom, self.rotation);
+        if let Some(r) = self
+            .recents
+            .iter_mut()
+            .find(|r| r.path.to_string_lossy().eq_ignore_ascii_case(&path))
+        {
+            r.page = page;
+            r.zoom = zoom;
+            r.rotation = rotation;
+        }
+    }
+
+    /// Jump that records history (links, TOC, page box) — Alt+Left goes back.
+    fn jump_with_history(&mut self, page: i32) {
+        let count = self.page_count();
+        if count == 0 {
+            return;
+        }
+        let target = page.clamp(0, count - 1);
+        if target != self.page_index {
+            self.back_stack.push(self.page_index);
+            self.back_stack.truncate(64);
+            self.fwd_stack.clear();
+        }
+        self.go_to_page(target);
+    }
+
+    fn nav_back(&mut self) {
+        if let Some(p) = self.back_stack.pop() {
+            self.fwd_stack.push(self.page_index);
+            self.go_to_page(p);
+        }
+    }
+
+    fn nav_forward(&mut self) {
+        if let Some(p) = self.fwd_stack.pop() {
+            self.back_stack.push(self.page_index);
+            self.go_to_page(p);
+        }
+    }
+
+    /// Which page (strictly) contains this screen position, and where on it
+    /// in unrotated page coordinates (points).
+    fn page_at(&self, pages: &[(i32, egui::Rect)], pos: egui::Pos2) -> Option<(i32, egui::Vec2)> {
+        let scale = PX_PER_PT * self.effective_zoom;
+        for &(page, rect) in pages {
+            if rect.contains(pos) {
+                let view_local = (pos - rect.min) / scale;
+                let (w_pt, h_pt) = self.page_sizes.get(page as usize).copied()?;
+                return Some((page, point_to_page(view_local, self.rotation, w_pt, h_pt)));
+            }
+        }
+        None
+    }
+
+    /// Resets every inline per-document field (no tab bookkeeping).
+    fn clear_inline_doc(&mut self) {
+        self.doc = None;
+        self.page_sizes = Arc::new(Vec::new());
+        self.page_index = 0;
+        self.rotation = 0;
+        self.cache.clear();
+        self.thumb_cache.clear();
+        self.search.deactivate();
+        self.set_selection(None);
+        self.text_counts.clear();
+        self.toc = Vec::new();
+        self.back_stack.clear();
+        self.fwd_stack.clear();
+        self.doc_password = None;
+        self.scroll_to = None;
+        self.last_hit_test = None;
+        self.last_link_probe = None;
+    }
+
+    /// Parks the active tab's inline state back into its slot.
+    fn stash_active_tab(&mut self) {
+        if self.doc.is_none() {
+            self.active_tab = None;
+            return;
+        }
+        self.stash_doc_state(); // per-file memory (recents)
+        let Some(i) = self.active_tab else {
+            // Inline doc without a tab slot shouldn't happen; drop it.
+            self.clear_inline_doc();
+            return;
+        };
+        let doc = self.doc.take().expect("checked above");
+        let state = DocTab {
+            doc,
+            page_sizes: std::mem::take(&mut self.page_sizes),
+            page_index: self.page_index,
+            zoom: self.zoom,
+            effective_zoom: self.effective_zoom,
+            rotation: self.rotation,
+            search: std::mem::take(&mut self.search),
+            selection: self.selection.take(),
+            text_counts: std::mem::take(&mut self.text_counts),
+            toc: std::mem::take(&mut self.toc),
+            back_stack: std::mem::take(&mut self.back_stack),
+            fwd_stack: std::mem::take(&mut self.fwd_stack),
+            doc_password: self.doc_password.take(),
+            saved_offset: self.last_offset,
+        };
+        if let Some(slot) = self.tabs.get_mut(i) {
+            slot.state = Some(Box::new(state));
+        }
+        // Reset leftovers (textures re-render on switch-back).
+        self.cache.clear();
+        self.thumb_cache.clear();
+        self.sel_rects.clear();
+        self.selecting = false;
+        self.last_hit_test = None;
+        self.last_link_probe = None;
+        self.scroll_to = None;
+        self.rotation = 0;
+        self.active_tab = None;
+    }
+
+    /// Makes tab `i` the active one (parks the current tab first).
+    fn activate_tab(&mut self, ctx: &egui::Context, i: usize) {
+        if self.active_tab == Some(i) || i >= self.tabs.len() {
+            return;
+        }
+        self.stash_active_tab();
+        let Some(state) = self.tabs[i].state.take() else {
+            return;
+        };
+        let s = *state;
+        self.doc = Some(s.doc);
+        self.page_sizes = s.page_sizes;
+        self.page_index = s.page_index;
+        self.zoom = s.zoom;
+        self.effective_zoom = s.effective_zoom;
+        self.rotation = s.rotation;
+        self.search = s.search;
+        self.selection = s.selection;
+        self.sel_rects.clear();
+        self.text_counts = s.text_counts;
+        self.toc = s.toc;
+        self.back_stack = s.back_stack;
+        self.fwd_stack = s.fwd_stack;
+        self.doc_password = s.doc_password;
+        self.scroll_to = Some(ScrollTarget::Offset(s.saved_offset));
+        self.page_field = (s.page_index + 1).to_string();
+        self.active_tab = Some(i);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{} — PaperView",
+            self.tabs[i].title
+        )));
+    }
+
+    /// Closes tab `i` (active or background).
+    fn close_tab(&mut self, ctx: &egui::Context, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        // Remember the closed tab so Ctrl+Shift+T can reopen it.
+        let tab = &self.tabs[i];
+        let password = if self.active_tab == Some(i) {
+            self.doc_password.clone()
+        } else {
+            tab.state.as_ref().and_then(|s| s.doc_password.clone())
+        };
+        self.closed_tabs.push((tab.path.clone(), password));
+        if self.closed_tabs.len() > 32 {
+            self.closed_tabs.remove(0); // drop the oldest, keep recent closes
+        }
+        if self.active_tab == Some(i) {
+            self.stash_doc_state();
+            self.clear_inline_doc();
+            self.tabs.remove(i);
+            self.active_tab = None;
+            if self.tabs.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("PaperView".into()));
+            } else {
+                let next = i.min(self.tabs.len() - 1);
+                self.activate_tab(ctx, next);
+            }
+        } else {
+            self.tabs.remove(i);
+            self.active_tab = fix_active_after_remove(self.active_tab, i);
+        }
+    }
+
+    /// Shows the landing page; open tabs stay parked in the strip.
+    fn go_home(&mut self, ctx: &egui::Context) {
+        self.stash_active_tab();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("PaperView".into()));
+    }
+
+    /// Cycles to the next/previous tab (Ctrl+Tab / Ctrl+Shift+Tab).
+    fn cycle_tab(&mut self, ctx: &egui::Context, dir: i32) {
+        let len = self.tabs.len();
+        if len == 0 {
+            return;
+        }
+        let next = match self.active_tab {
+            Some(a) => (a as i32 + dir).rem_euclid(len as i32) as usize,
+            None => {
+                if dir > 0 {
+                    0
+                } else {
+                    len - 1
+                }
+            }
+        };
+        self.activate_tab(ctx, next);
+    }
+
+    /// Close the current document (its tab) and return to the landing page.
+    fn close_doc(&mut self, ctx: &egui::Context) {
+        if let Some(i) = self.active_tab {
+            self.close_tab(ctx, i);
+        } else {
+            self.clear_inline_doc();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title("PaperView".into()));
+        }
+    }
+
+    /// Reopens the most recently closed tab (Ctrl+Shift+T).
+    fn reopen_closed_tab(&mut self, ctx: &egui::Context) {
+        if let Some((path, password)) = self.closed_tabs.pop() {
+            if path.exists() {
+                self.try_open(ctx, &path, password.as_deref(), false);
+            }
+        }
+    }
+
+    fn start_cloud_op(&mut self, ctx: &egui::Context, op: CloudOp) {
+        if self.cloud_busy {
+            self.cloud_queue.push_back(op);
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud_rx = Some(rx);
+        self.cloud_busy = true;
+        self.cloud_status = None;
+        cloud::spawn(self.cloud_cfg.clone(), op, tx, ctx.clone());
+    }
+
+    fn open_dialog(&mut self, ctx: &egui::Context) {
+        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]);
+        if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.open_path(ctx, &path);
+        }
+    }
+
+    fn page_count(&self) -> i32 {
+        self.page_sizes.len() as i32
+    }
+
+    fn go_to_page(&mut self, page: i32) {
+        let count = self.page_count();
+        if count == 0 {
+            return;
+        }
+        let clamped = page.clamp(0, count - 1);
+        if clamped != self.page_index {
+            self.page_index = clamped;
+            self.scroll_to = Some(ScrollTarget::PageTop(clamped));
+        }
+        self.page_field = (clamped + 1).to_string();
+    }
+
+    fn change_zoom(&mut self, zoom: Zoom, anchor: Option<egui::Vec2>) {
+        self.zoom_prev_effective = Some(self.effective_zoom);
+        self.zoom_anchor = anchor;
+        self.zoom_gesture_until = Some(Instant::now() + ZOOM_SETTLE);
+        self.zoom = match zoom {
+            Zoom::Custom(z) => Zoom::Custom(z.clamp(MIN_ZOOM, MAX_ZOOM)),
+            other => other,
+        };
+    }
+
+    fn zoom_gesture_active(&self) -> bool {
+        self.zoom_gesture_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn pointer_anchor(&self, ctx: &egui::Context) -> Option<egui::Vec2> {
+        let pos = ctx.input(|i| i.pointer.hover_pos())?;
+        if self.central_rect.contains(pos) {
+            Some(pos - self.central_rect.min)
+        } else {
+            None
+        }
+    }
+
+    fn search_step(&mut self, dir: i32) {
+        let sel = match &self.doc {
+            Some(doc) => self.search.step(doc, dir),
+            None => None,
+        };
+        if let Some((page, hit)) = sel {
+            self.page_index = page;
+            self.scroll_to = Some(ScrollTarget::Hit(page, hit));
+        }
+    }
+
+    fn submit_search(&mut self) {
+        let sel = match &self.doc {
+            Some(doc) => self.search.submit(doc, self.page_index),
+            None => None,
+        };
+        if let Some((page, hit)) = sel {
+            self.page_index = page;
+            self.scroll_to = Some(ScrollTarget::Hit(page, hit));
+        }
+    }
+
+    /// Opens the system print dialog and spawns the print worker.
+    fn start_print(&mut self, ctx: &egui::Context) {
+        if self.printing || self.print_preview.is_some() {
+            return;
+        }
+        let Some(doc) = &self.doc else { return };
+        let (path, name) = (
+            doc.path.clone(),
+            doc.path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "PaperView document".into()),
+        );
+        let count = self.page_count();
+        let Some(engine) = self.engine else { return };
+        let _ = (engine, ctx); // job spawns after the preview is confirmed
+        match print::show_dialog(self.hwnd, count) {
+            Ok(Some(ticket)) => {
+                let page = ticket.from;
+                self.print_preview = Some(PrintPreviewState {
+                    ticket: Some(ticket),
+                    path,
+                    doc_name: name,
+                    page,
+                    tex: None,
+                    tex_page: -1,
+                });
+            }
+            Ok(None) => {} // cancelled
+            Err(e) => self.status = Some(e),
+        }
+    }
+
+    /// Accurate preview of the pending print job (paper metrics come from the
+    /// chosen printer's device context). Confirms or cancels the job.
+    fn print_preview_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut pv) = self.print_preview.take() else {
+            return;
+        };
+        let Some(ticket_ref) = pv.ticket.as_ref() else {
+            return;
+        };
+        let (from, to) = (ticket_ref.from, ticket_ref.to);
+        let (dev_w, dev_h, dpi) = (ticket_ref.dev_w, ticket_ref.dev_h, ticket_ref.dpi);
+
+        // Ensure the preview texture for the current page exists (modest
+        // resolution; the print path renders separately at printer dpi).
+        let (w_pt, h_pt) = self
+            .page_sizes
+            .get(pv.page as usize)
+            .copied()
+            .unwrap_or((612.0, 792.0));
+        let layout = print::layout_on_paper(w_pt, h_pt, dev_w, dev_h);
+        if pv.tex_page != pv.page {
+            if let Some(doc) = &self.doc {
+                let ppp = ctx.pixels_per_point();
+                let px = ((340.0 * layout.w * ppp).round() as i32).clamp(64, 2000);
+                if let Ok(r) = doc.render_page(pv.page, px, layout.rotate) {
+                    let image =
+                        egui::ColorImage::from_rgba_unmultiplied([r.width, r.height], &r.rgba);
+                    pv.tex = Some(ctx.load_texture(
+                        "print-preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    pv.tex_page = pv.page;
+                }
+            }
+        }
+
+        let mut do_print = false;
+        let mut do_cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("print-preview")).show(ctx, |ui| {
+            ui.label(egui::RichText::new("Print preview").strong());
+            let paper_in = (dev_w as f32 / dpi as f32, dev_h as f32 / dpi as f32);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Pages {} to {} | paper {:.1} x {:.1} in | {} dpi{}",
+                    from + 1,
+                    to + 1,
+                    paper_in.0,
+                    paper_in.1,
+                    dpi,
+                    if layout.rotate == 1 {
+                        " | rotated to fit"
+                    } else {
+                        ""
+                    }
+                ))
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+
+            // Paper mock-up in the printable area's exact aspect ratio.
+            let aspect = dev_h as f32 / dev_w as f32;
+            let mut paper_w = 340.0_f32;
+            let mut paper_h = paper_w * aspect;
+            if paper_h > 420.0 {
+                paper_h = 420.0;
+                paper_w = paper_h / aspect;
+            }
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(paper_w, paper_h), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(1), egui::Color32::WHITE);
+            if let Some(tex) = &pv.tex {
+                let dest = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(layout.x * paper_w, layout.y * paper_h),
+                    egui::vec2(layout.w * paper_w, layout.h * paper_h),
+                );
+                ui.painter().image(
+                    tex.id(),
+                    dest,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(pv.page > from, egui::Button::new("◀"))
+                    .clicked()
+                {
+                    pv.page -= 1;
+                }
+                ui.label(format!("Page {} of {}", pv.page + 1, to + 1));
+                if ui
+                    .add_enabled(pv.page < to, egui::Button::new("▶"))
+                    .clicked()
+                {
+                    pv.page += 1;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                    if ui.button(egui::RichText::new("Print").strong()).clicked() {
+                        do_print = true;
+                    }
+                });
+            });
+        });
+        if modal.should_close() {
+            do_cancel = true;
+        }
+
+        if do_print {
+            if let (Some(ticket), Some(engine)) = (pv.ticket.take(), self.engine) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.print_rx = Some(rx);
+                self.printing = true;
+                print::spawn_print(
+                    engine,
+                    pv.path.clone(),
+                    self.doc_password.clone(),
+                    ticket,
+                    pv.doc_name.clone(),
+                    tx,
+                    ctx.clone(),
+                );
+            }
+        } else if !do_cancel {
+            self.print_preview = Some(pv);
+        }
+        // On cancel `pv` drops here; the ticket's Drop releases the DC.
+    }
+
+    /// Rotates the whole document view by the given quarter turns.
+    fn rotate_by(&mut self, quarters: i8) {
+        self.rotation = (self.rotation as i8 + quarters).rem_euclid(4) as u8;
+        self.cache.clear();
+        self.thumb_cache.clear();
+        self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+    }
+
+    /// "Save as": copies the open document's file to a chosen destination.
+    fn save_as(&mut self) {
+        let Some(src) = self.doc.as_ref().map(|d| d.path.clone()) else {
+            return;
+        };
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document.pdf".into());
+        let dialog = rfd::FileDialog::new()
+            .add_filter("PDF documents", &["pdf"])
+            .set_file_name(&name);
+        if let Some(dest) = dialog.save_file() {
+            match std::fs::copy(&src, &dest) {
+                Ok(_) => self.status = Some(format!("Saved a copy to {}", dest.display())),
+                Err(e) => self.status = Some(format!("Save as failed: {e}")),
+            }
+        }
+    }
+
+    // ── text selection ───────────────────────────────────────────────────────
+
+    fn set_selection(&mut self, sel: Option<((i32, i32), (i32, i32))>) {
+        self.selection = sel;
+        self.selecting = false;
+        self.sel_rects.clear();
+    }
+
+    /// Selection normalized to document order (start ≤ end).
+    fn sel_ordered(&self) -> Option<((i32, i32), (i32, i32))> {
+        self.selection
+            .map(|(a, b)| if b < a { (b, a) } else { (a, b) })
+    }
+
+    fn char_count_cached(&mut self, page: i32) -> i32 {
+        if let Some(c) = self.text_counts.get(&page) {
+            return *c;
+        }
+        let c = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.char_count(page).ok())
+            .unwrap_or(0);
+        self.text_counts.insert(page, c);
+        c
+    }
+
+    /// The selected (start, count) char range on one page, if any.
+    fn sel_range_on_page(&mut self, page: i32) -> Option<(i32, i32)> {
+        let (a, b) = self.sel_ordered()?;
+        if page < a.0 || page > b.0 {
+            return None;
+        }
+        let start = if page == a.0 { a.1 } else { 0 };
+        let end = if page == b.0 {
+            b.1
+        } else {
+            self.char_count_cached(page) - 1
+        };
+        if end < start {
+            return None;
+        }
+        Some((start, end - start + 1))
+    }
+
+    /// Cached highlight rects for the current selection on one page.
+    fn sel_rects_for(&mut self, page: i32) -> Option<Vec<crate::pdf::HitRect>> {
+        let range = self.sel_range_on_page(page)?;
+        if let Some(rects) = self.sel_rects.get(&page) {
+            return Some(rects.clone());
+        }
+        let rects = self.doc.as_ref()?.range_rects(page, range.0, range.1).ok()?;
+        self.sel_rects.insert(page, rects.clone());
+        Some(rects)
+    }
+
+    /// Maps a screen position to (page, char index). `strict` requires the
+    /// point to be on a page and near text (selection start); non-strict
+    /// snaps to the nearest page/char (drag continuation).
+    fn hit_test(
+        &mut self,
+        pages: &[(i32, egui::Rect)],
+        pos: egui::Pos2,
+        strict: bool,
+    ) -> Option<(i32, i32)> {
+        if !strict {
+            if let Some((p, r)) = self.last_hit_test {
+                if (p - pos).length() < 2.0 {
+                    return Some(r);
+                }
+            }
+        }
+        let scale = PX_PER_PT * self.effective_zoom;
+        let mut best: Option<(i32, egui::Rect, f32)> = None;
+        for &(page, rect) in pages {
+            let dx = (rect.min.x - pos.x).max(pos.x - rect.max.x).max(0.0);
+            let dy = (rect.min.y - pos.y).max(pos.y - rect.max.y).max(0.0);
+            let d = dx.max(dy);
+            if d <= 0.0 {
+                best = Some((page, rect, 0.0));
+                break;
+            }
+            if !strict && best.is_none_or(|(_, _, bd)| d < bd) {
+                best = Some((page, rect, d));
+            }
+        }
+        let (page, rect, dist) = best?;
+        if strict && dist > 0.0 {
+            return None;
+        }
+        let view_local = (pos - rect.min) / scale; // view points (rotated space)
+        let (w_pt, h_pt) = self.page_sizes.get(page as usize).copied()?;
+        let local = point_to_page(view_local, self.rotation, w_pt, h_pt);
+        let (tol_x, tol_y) = if strict { (12.0, 10.0) } else { (w_pt, h_pt) };
+        let idx = {
+            let doc = self.doc.as_ref()?;
+            doc.char_index_at(page, local.x, local.y, tol_x, tol_y, !strict)
+                .ok()??
+        };
+        let result = (page, idx);
+        self.last_hit_test = Some((pos, result));
+        Some(result)
+    }
+
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        let Some((a, b)) = self.sel_ordered() else {
+            return;
+        };
+        let mut out = String::new();
+        for page in a.0..=b.0 {
+            let Some((start, count)) = self.sel_range_on_page(page) else {
+                continue;
+            };
+            let text = match &self.doc {
+                Some(doc) => doc.range_text(page, start, count).unwrap_or_default(),
+                None => return,
+            };
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push_str("\r\n");
+            }
+            out.push_str(&text);
+        }
+        if !out.is_empty() {
+            ctx.copy_text(out);
+        }
+    }
+
+    fn select_all(&mut self) {
+        let count = self.page_count();
+        if count == 0 {
+            return;
+        }
+        let last = count - 1;
+        let last_chars = self.char_count_cached(last);
+        self.set_selection(Some(((0, 0), (last, (last_chars - 1).max(0)))));
+    }
+
+    /// Selection pointer interaction over the page area. `pages` are the
+    /// on-screen page rects; `content` is the full scrollable content rect.
+    fn selection_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        pages: &[(i32, egui::Rect)],
+        content: egui::Rect,
+    ) {
+        let id = ui.id().with("text-select");
+        let resp = ui.interact(content, id, egui::Sense::click_and_drag());
+        let pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
+
+        // Link probe under the pointer (throttled to pointer movement).
+        let mut hovered_link: Option<LinkTarget> = None;
+        if let Some(p) = pos {
+            if !self.selecting {
+                match self.last_link_probe {
+                    Some((prev, ref cached)) if (prev - p).length() < 2.0 => {
+                        hovered_link = cached.clone();
+                    }
+                    _ => {
+                        hovered_link = self.page_at(pages, p).and_then(|(page, pt)| {
+                            let doc = self.doc.as_ref()?;
+                            doc.link_at(page, pt.x, pt.y).ok().flatten()
+                        });
+                        self.last_link_probe = Some((p, hovered_link.clone()));
+                    }
+                }
+            }
+        }
+        if resp.hovered() {
+            let icon = if hovered_link.is_some() {
+                egui::CursorIcon::PointingHand
+            } else {
+                egui::CursorIcon::Text
+            };
+            ui.output_mut(|o| o.cursor_icon = icon);
+            if let Some(LinkTarget::Uri(uri)) = &hovered_link {
+                resp.clone().on_hover_text(uri.clone());
+            }
+        }
+
+        if resp.drag_started() {
+            if let Some(p) = pos {
+                match self.hit_test(pages, p, true) {
+                    Some(hit) => {
+                        self.set_selection(Some((hit, hit)));
+                        self.selecting = true;
+                    }
+                    None => self.set_selection(None),
+                }
+            }
+        } else if resp.dragged() && self.selecting {
+            if let Some(p) = pos {
+                if let Some(hit) = self.hit_test(pages, p, false) {
+                    if let Some((anchor, head)) = self.selection {
+                        if head != hit {
+                            self.selection = Some((anchor, hit));
+                            self.sel_rects.clear();
+                        }
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.selecting = false;
+        }
+
+        if resp.double_clicked() {
+            if let Some(p) = pos {
+                if let Some((page, idx)) = self.hit_test(pages, p, true) {
+                    let range = self
+                        .doc
+                        .as_ref()
+                        .and_then(|d| d.word_range_at(page, idx).ok());
+                    if let Some((start, count)) = range {
+                        self.set_selection(Some(((page, start), (page, start + count - 1))));
+                    }
+                }
+            }
+        } else if resp.clicked() {
+            match hovered_link {
+                Some(LinkTarget::Page(page)) => self.jump_with_history(page),
+                Some(LinkTarget::Uri(uri)) => {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
+                }
+                None => self.set_selection(None),
+            }
+        }
+
+        let ctx = ui.ctx().clone();
+        resp.context_menu(|ui| {
+            let have = self.selection.is_some();
+            if ui
+                .add_enabled(have, egui::Button::new("Copy"))
+                .clicked()
+            {
+                self.copy_selection(&ctx);
+                ui.close();
+            }
+            if ui.button("Select all").clicked() {
+                self.select_all();
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Save as…").clicked() {
+                self.save_as();
+                ui.close();
+            }
+            if ui.button("Open file location").clicked() {
+                if let Some(p) = self.doc.as_ref().map(|d| d.path.clone()) {
+                    open_file_location(&p);
+                }
+                ui.close();
+            }
+        });
+    }
+
+    // ── input ────────────────────────────────────────────────────────────────
+
+    fn handle_input(&mut self, ctx: &egui::Context) {
+        // File drops: on the Saved tab they queue uploads; otherwise open.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            let upload_mode = self.doc.is_none()
+                && self.landing_tab == LandingTab::Saved
+                && self.cloud_cfg.ready();
+            if upload_mode {
+                let mut queued = 0usize;
+                for path in dropped
+                    .iter()
+                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+                {
+                    self.start_cloud_op(ctx, CloudOp::Upload(path.clone()));
+                    queued += 1;
+                }
+                if queued > 0 {
+                    self.cloud_status = Some(format!(
+                        "Queued {queued} upload{}",
+                        if queued == 1 { "" } else { "s" }
+                    ));
+                } else if let Some(path) = dropped.first() {
+                    self.open_path(ctx, path);
+                }
+            } else if let Some(path) = dropped.first() {
+                self.open_path(ctx, path);
+            }
+        }
+
+        let typing = ctx.egui_wants_keyboard_input();
+        let search_active = self.search.active;
+        let has_selection = self.selection.is_some();
+
+        struct Keys {
+            open: bool,
+            next: bool,
+            prev: bool,
+            first: bool,
+            last: bool,
+            zoom_in: bool,
+            zoom_out: bool,
+            zoom_100: bool,
+            pinch: f32,
+            find: bool,
+            find_next: bool,
+            find_prev: bool,
+            nav_back: bool,
+            nav_fwd: bool,
+            scroll_lines: f32,
+            space_fwd: bool,
+            space_back: bool,
+            escape: bool,
+            copy: bool,
+            select_all: bool,
+            save_as: bool,
+            print: bool,
+            close_tab: bool,
+            tab_next: bool,
+            tab_prev: bool,
+            reopen_closed: bool,
+            wheel_y: f32,
+        }
+        let k = ctx.input_mut(|i| Keys {
+            open: i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
+            zoom_in: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
+                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals)
+                || (!typing && i.key_pressed(egui::Key::Plus)),
+            zoom_out: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus)
+                || (!typing && i.key_pressed(egui::Key::Minus)),
+            zoom_100: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0),
+            next: !typing
+                && (i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::ArrowRight)),
+            prev: !typing
+                && (i.key_pressed(egui::Key::PageUp) || i.key_pressed(egui::Key::ArrowLeft)),
+            first: !typing && i.key_pressed(egui::Key::Home),
+            last: !typing && i.key_pressed(egui::Key::End),
+            pinch: i.zoom_delta(),
+            find: i.consume_key(egui::Modifiers::COMMAND, egui::Key::F),
+            find_next: i.consume_key(egui::Modifiers::NONE, egui::Key::F3),
+            find_prev: i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3),
+            nav_back: i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
+            nav_fwd: i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight),
+            scroll_lines: {
+                let mut d = 0.0f32;
+                if !typing {
+                    if i.key_pressed(egui::Key::ArrowDown) {
+                        d += 64.0;
+                    }
+                    if i.key_pressed(egui::Key::ArrowUp) {
+                        d -= 64.0;
+                    }
+                }
+                d
+            },
+            space_fwd: !typing
+                && i.modifiers.is_none()
+                && i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
+            space_back: !typing && i.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
+            escape: (search_active || has_selection)
+                && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            copy: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+            select_all: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
+            save_as: i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
+                || i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S),
+            print: i.consume_key(egui::Modifiers::COMMAND, egui::Key::P),
+            close_tab: i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+            tab_next: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Tab),
+            tab_prev: i
+                .consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Tab),
+            reopen_closed: i
+                .consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::T),
+            wheel_y: if i.modifiers.ctrl {
+                0.0
+            } else {
+                i.smooth_scroll_delta.y
+            },
+        });
+        self.wheel_y = k.wheel_y;
+
+        if k.open {
+            self.open_dialog(ctx);
+        }
+        if k.tab_next {
+            self.cycle_tab(ctx, 1);
+        }
+        if k.tab_prev {
+            self.cycle_tab(ctx, -1);
+        }
+        if k.reopen_closed {
+            self.reopen_closed_tab(ctx);
+        }
+        if k.close_tab {
+            if let Some(i) = self.active_tab {
+                self.close_tab(ctx, i);
+            }
+        }
+        if k.find {
+            self.focus_search = true;
+        }
+        if k.escape {
+            if self.selection.is_some() {
+                self.set_selection(None);
+            } else {
+                self.search.deactivate();
+            }
+        }
+        if self.doc.is_none() {
+            return;
+        }
+        if k.copy {
+            self.copy_selection(ctx);
+        }
+        if k.select_all {
+            self.select_all();
+        }
+        if k.save_as {
+            self.save_as();
+        }
+        if k.print {
+            self.start_print(ctx);
+        }
+        if k.next {
+            self.go_to_page(self.page_index + 1);
+        }
+        if k.prev {
+            self.go_to_page(self.page_index - 1);
+        }
+        if k.first {
+            self.go_to_page(0);
+        }
+        if k.last {
+            self.go_to_page(i32::MAX); // clamped to the last page
+        }
+        if k.find_next {
+            self.search_step(1);
+        }
+        if k.find_prev {
+            self.search_step(-1);
+        }
+        if k.nav_back {
+            self.nav_back();
+        }
+        if k.nav_fwd {
+            self.nav_forward();
+        }
+        if k.scroll_lines != 0.0 {
+            self.pending_scroll += k.scroll_lines;
+        }
+        let screenful = (self.central_rect.height() * 0.85).max(64.0);
+        if k.space_fwd {
+            if self.mode == ViewMode::Single && self.last_at_bottom {
+                self.go_to_page(self.page_index + 1);
+            } else {
+                self.pending_scroll += screenful;
+            }
+        }
+        if k.space_back {
+            if self.mode == ViewMode::Single && self.last_at_top {
+                self.page_index = (self.page_index - 1).max(0);
+                self.scroll_to = Some(ScrollTarget::PageBottom(self.page_index));
+            } else {
+                self.pending_scroll -= screenful;
+            }
+        }
+        if k.zoom_in {
+            self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
+        }
+        if k.zoom_out {
+            self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
+        }
+        if k.zoom_100 {
+            self.change_zoom(Zoom::Custom(1.0), None);
+        }
+        if k.pinch != 1.0 {
+            let anchor = self.pointer_anchor(ctx);
+            self.change_zoom(Zoom::Custom(self.effective_zoom * k.pinch), anchor);
+        }
+    }
+
+    // ── chrome ───────────────────────────────────────────────────────────────
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            // Widgets keep their intrinsic width — never wrap text mid-word.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            self.tab_strip(ui, &ctx);
+            ui.add_space(4.0);
+            // Deterministic row tiers: clusters stay intact and fold onto
+            // extra rows at fixed widths. Space, not separator bars.
+            let w = ui.available_width();
+            if w >= 980.0 {
+                ui.horizontal(|ui| {
+                    self.tb_file(ui, &ctx);
+                    ui.add_space(14.0);
+                    self.tb_nav(ui);
+                    ui.add_space(14.0);
+                    self.tb_zoom(ui);
+                    ui.add_space(14.0);
+                    self.tb_mode(ui);
+                    ui.add_space(14.0);
+                    self.tb_sidebar(ui);
+                    ui.add_space(14.0);
+                    self.tb_search(ui);
+                    ui.add_space(10.0);
+                    self.tb_menu(ui, &ctx);
+                });
+            } else if w >= 640.0 {
+                ui.horizontal(|ui| {
+                    self.tb_file(ui, &ctx);
+                    ui.add_space(14.0);
+                    self.tb_nav(ui);
+                    ui.add_space(14.0);
+                    self.tb_zoom(ui);
+                });
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    self.tb_mode(ui);
+                    ui.add_space(14.0);
+                    self.tb_sidebar(ui);
+                    ui.add_space(14.0);
+                    self.tb_search(ui);
+                    ui.add_space(10.0);
+                    self.tb_menu(ui, &ctx);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    self.tb_file(ui, &ctx);
+                    ui.add_space(12.0);
+                    self.tb_nav(ui);
+                });
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    self.tb_zoom(ui);
+                    ui.add_space(12.0);
+                    self.tb_mode(ui);
+                    ui.add_space(12.0);
+                    self.tb_sidebar(ui);
+                });
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    self.tb_search(ui);
+                    ui.add_space(10.0);
+                    self.tb_menu(ui, &ctx);
+                });
+            }
+            ui.add_space(3.0);
+        });
+    }
+
+    /// Browser-style tab strip (only shown when documents are open).
+    fn tab_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui
+                .selectable_label(self.active_tab.is_none(), " Home ")
+                .on_hover_text("Landing page — recents & cloud (tabs stay open)")
+                .clicked()
+            {
+                self.go_home(ctx);
+            }
+            let mut activate: Option<usize> = None;
+            let mut close: Option<usize> = None;
+            egui::ScrollArea::horizontal()
+                .id_salt("tab-strip")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (i, tab) in self.tabs.iter().enumerate() {
+                            let selected = self.active_tab == Some(i);
+                            let label = truncate_title(&tab.title);
+                            let resp = ui
+                                .selectable_label(selected, label)
+                                .on_hover_text(tab.path.display().to_string());
+                            if resp.clicked() {
+                                activate = Some(i);
+                            }
+                            if resp.middle_clicked() {
+                                close = Some(i);
+                            }
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Close tab (Ctrl+W)")
+                                .clicked()
+                            {
+                                close = Some(i);
+                            }
+                            ui.add_space(6.0);
+                        }
+                    });
+                });
+            if let Some(i) = activate {
+                self.activate_tab(ctx, i);
+            }
+            if let Some(i) = close {
+                self.close_tab(ctx, i);
+            }
+        });
+        ui.add_space(3.0);
+        ui.separator();
+    }
+
+    fn tb_file(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if ui
+            .button("Open…")
+            .on_hover_text("Open a PDF (Ctrl+O)")
+            .clicked()
+        {
+            self.open_dialog(ctx);
+        }
+        ui.add_enabled_ui(self.doc.is_some() && !self.printing, |ui| {
+            if ui.button("Print…").on_hover_text("Print (Ctrl+P)").clicked() {
+                self.start_print(ctx);
+            }
+        });
+    }
+
+    fn tb_nav(&mut self, ui: &mut egui::Ui) {
+        let page_count = self.page_count();
+        ui.add_enabled_ui(page_count > 0, |ui| {
+            if ui
+                .button("◀")
+                .on_hover_text("Previous page (PgUp / ←)")
+                .clicked()
+            {
+                self.go_to_page(self.page_index - 1);
+            }
+            let field =
+                ui.add(egui::TextEdit::singleline(&mut self.page_field).desired_width(36.0));
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Ok(n) = self.page_field.trim().parse::<i32>() {
+                    if n >= 1 && n <= page_count {
+                        self.jump_with_history(n - 1);
+                    }
+                }
+            }
+            if !field.has_focus() {
+                self.page_field = (self.page_index + 1).to_string();
+            }
+            ui.label(
+                egui::RichText::new(format!("/ {page_count}"))
+                    .color(ui.visuals().weak_text_color()),
+            );
+            if ui
+                .button("▶")
+                .on_hover_text("Next page (PgDn / →)")
+                .clicked()
+            {
+                self.go_to_page(self.page_index + 1);
+            }
+        });
+    }
+
+    fn tb_zoom(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.page_count() > 0, |ui| {
+            if ui.button("−").on_hover_text("Zoom out (Ctrl+-)").clicked() {
+                self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
+            }
+            ui.label(
+                egui::RichText::new(format!("{:>4.0}%", self.effective_zoom * 100.0))
+                    .color(ui.visuals().weak_text_color()),
+            );
+            if ui.button("+").on_hover_text("Zoom in (Ctrl+=)").clicked() {
+                self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
+            }
+            ui.add_space(6.0);
+            if ui
+                .selectable_label(self.zoom == Zoom::FitWidth, "Fit width")
+                .clicked()
+            {
+                self.change_zoom(Zoom::FitWidth, None);
+            }
+            if ui
+                .selectable_label(self.zoom == Zoom::FitPage, "Fit page")
+                .clicked()
+            {
+                self.change_zoom(Zoom::FitPage, None);
+            }
+        });
+    }
+
+    fn tb_mode(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.page_count() > 0, |ui| {
+            let scroll = ui
+                .selectable_label(self.mode == ViewMode::Continuous, "Scroll")
+                .on_hover_text("Continuous scrolling — pages flow into each other");
+            if scroll.clicked() && self.mode != ViewMode::Continuous {
+                self.mode = ViewMode::Continuous;
+                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+            }
+            let single = ui
+                .selectable_label(self.mode == ViewMode::Single, "Single")
+                .on_hover_text("One page at a time (wheel past an edge flips the page)");
+            if single.clicked() && self.mode != ViewMode::Single {
+                self.mode = ViewMode::Single;
+                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+            }
+        });
+    }
+
+    fn tb_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.doc.is_some(), |ui| {
+            if ui
+                .selectable_label(self.sidebar == SidebarMode::Thumbs, "☰")
+                .on_hover_text("Thumbnail sidebar")
+                .clicked()
+            {
+                self.sidebar = if self.sidebar == SidebarMode::Thumbs {
+                    SidebarMode::Hidden
+                } else {
+                    SidebarMode::Thumbs
+                };
+            }
+            ui.add_enabled_ui(!self.toc.is_empty(), |ui| {
+                if ui
+                    .selectable_label(self.sidebar == SidebarMode::Toc, "TOC")
+                    .on_hover_text("Table of contents (document outline)")
+                    .clicked()
+                {
+                    self.sidebar = if self.sidebar == SidebarMode::Toc {
+                        SidebarMode::Hidden
+                    } else {
+                        SidebarMode::Toc
+                    };
+                }
+            });
+        });
+    }
+
+    fn tb_search(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.page_count() > 0, |ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.search.input)
+                    .desired_width(150.0)
+                    .hint_text("Search (Ctrl+F)"),
+            );
+            if std::mem::take(&mut self.focus_search) {
+                edit.request_focus();
+            }
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.submit_search();
+                edit.request_focus(); // keep typing / Enter again = next
+            }
+            if ui
+                .add_enabled(self.search.active, egui::Button::new("◀"))
+                .on_hover_text("Previous match (Shift+F3)")
+                .clicked()
+            {
+                self.search_step(-1);
+            }
+            if ui
+                .add_enabled(self.search.active, egui::Button::new("▶"))
+                .on_hover_text("Next match (F3)")
+                .clicked()
+            {
+                self.search_step(1);
+            }
+            if self.search.active {
+                let (pos, total) = self.search.counter();
+                let text = if !self.search.done() {
+                    format!("{pos}/{total}…")
+                } else if total == 0 {
+                    "0 results".to_string()
+                } else {
+                    format!("{pos}/{total}")
+                };
+                ui.label(text);
+            }
+        });
+    }
+
+    /// Overflow menu for the less-frequent actions.
+    fn tb_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.menu_button("⋯", |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let have_doc = self.doc.is_some();
+            ui.add_enabled_ui(have_doc, |ui| {
+                if ui.button("Rotate left").clicked() {
+                    self.rotate_by(-1);
+                    ui.close();
+                }
+                if ui.button("Rotate right").clicked() {
+                    self.rotate_by(1);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Save as…  (Ctrl+S)").clicked() {
+                    self.save_as();
+                    ui.close();
+                }
+                if ui.button("Open file location").clicked() {
+                    if let Some(p) = self.doc.as_ref().map(|d| d.path.clone()) {
+                        open_file_location(&p);
+                    }
+                    ui.close();
+                }
+                ui.add_enabled_ui(self.cloud_cfg.ready() && !self.cloud_busy, |ui| {
+                    if ui.button("Save to cloud").clicked() {
+                        if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
+                            self.start_cloud_op(ctx, CloudOp::Upload(path));
+                        }
+                        ui.close();
+                    }
+                });
+                ui.separator();
+                if ui.button("Close tab  (Ctrl+W)").clicked() {
+                    self.close_doc(ctx);
+                    ui.close();
+                }
+            });
+            if ui.button("Home (landing page)").clicked() {
+                self.go_home(ctx);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button("Register as PDF viewer")
+                .on_hover_text(
+                    "Adds PaperView to Windows' Open-with list for .pdf \
+                     (current user only). Pick it once with “Always” to make \
+                     it the default.",
+                )
+                .clicked()
+            {
+                self.status = Some(match crate::assoc::register() {
+                    Ok(()) => {
+                        "Registered — right-click a PDF → Open with → PaperView".into()
+                    }
+                    Err(e) => format!("Registration failed: {e}"),
+                });
+                ui.close();
+            }
+            if ui.button("Unregister PDF viewer").clicked() {
+                let _ = crate::assoc::unregister();
+                self.status = Some("Removed PaperView from the Open-with list".into());
+                ui.close();
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Theme").small().color(ui.visuals().weak_text_color()));
+            if ui
+                .add_enabled(self.theme != ThemeChoice::Light, egui::Button::new("Light"))
+                .clicked()
+            {
+                self.theme = ThemeChoice::Light;
+                ctx.set_theme(egui::ThemePreference::Light);
+                ui.close();
+            }
+            if ui
+                .add_enabled(self.theme != ThemeChoice::Dark, egui::Button::new("Dark"))
+                .clicked()
+            {
+                self.theme = ThemeChoice::Dark;
+                ctx.set_theme(egui::ThemePreference::Dark);
+                ui.close();
+            }
+            if ui
+                .add_enabled(self.theme != ThemeChoice::System, egui::Button::new("System"))
+                .on_hover_text("Follow the OS light/dark setting")
+                .clicked()
+            {
+                self.theme = ThemeChoice::System;
+                ctx.set_theme(egui::ThemePreference::System);
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("More actions");
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        if self.status.is_none() {
+            return;
+        }
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("×").clicked() {
+                    self.status = None;
+                }
+                if let Some(msg) = &self.status {
+                    ui.colored_label(ui.visuals().error_fg_color, msg);
+                }
+            });
+        });
+    }
+
+    fn thumbs_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::left("thumbs")
+            .exact_size(THUMB_W + 32.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                let ppp = ctx.pixels_per_point();
+                let px_w = ((THUMB_W * ppp).round() as i32).clamp(16, MAX_TEXTURE_DIM);
+                let sizes = Arc::clone(&self.page_sizes);
+
+                // Fixed-width thumbs stacked vertically.
+                let gap = 10.0;
+                let rot = self.rotation % 4;
+                let mut tops = Vec::with_capacity(sizes.len());
+                let mut y = gap;
+                for &(w_pt, h_pt) in sizes.iter() {
+                    let (dw, dh) = if rot % 2 == 1 { (h_pt, w_pt) } else { (w_pt, h_pt) };
+                    let h = THUMB_W * dh / dw.max(1.0);
+                    tops.push((y, h));
+                    y += h + gap + 16.0; // room for the page-number caption
+                }
+                let total = egui::vec2(THUMB_W + 16.0, y);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_viewport(ui, |ui, viewport| {
+                        ui.set_min_size(total);
+                        let origin = ui.min_rect().min;
+                        let mut keep: HashSet<i32> = HashSet::new();
+                        for (i, &(top, h)) in tops.iter().enumerate() {
+                            if top + h < viewport.min.y - 200.0 {
+                                continue;
+                            }
+                            if top > viewport.max.y + 200.0 {
+                                break;
+                            }
+                            let page = i as i32;
+                            keep.insert(page);
+                            let rect = egui::Rect::from_min_size(
+                                origin + egui::vec2(8.0, top),
+                                egui::vec2(THUMB_W, h),
+                            );
+                            // Selection ring: a filled accent rect painted under
+                            // the thumbnail (avoids stroke-API churn).
+                            if page == self.page_index {
+                                ui.painter().rect_filled(
+                                    rect.expand(3.0),
+                                    egui::CornerRadius::same(3),
+                                    ui.visuals().selection.bg_fill,
+                                );
+                            }
+                            match self.thumb_cache.render_into(
+                                &ctx,
+                                self.doc.as_ref().expect("doc checked by caller"),
+                                page,
+                                px_w,
+                                rot,
+                                "thumb",
+                            ) {
+                                Ok((id, tsize)) => {
+                                    // Same pixel-grid snap as the main view.
+                                    let min =
+                                        ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
+                                    let snapped =
+                                        egui::Rect::from_min_size(min, tsize / ppp);
+                                    ui.painter().image(
+                                        id,
+                                        snapped,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+                                Err(e) => self.status = Some(e),
+                            }
+                            ui.painter().text(
+                                rect.center_bottom() + egui::vec2(0.0, 3.0),
+                                egui::Align2::CENTER_TOP,
+                                (page + 1).to_string(),
+                                egui::FontId::proportional(11.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                            let resp = ui.interact(
+                                rect,
+                                egui::Id::new(("thumb", page)),
+                                egui::Sense::click(),
+                            );
+                            if resp.clicked() {
+                                self.go_to_page(page);
+                            }
+                        }
+                        // Evict thumbs far outside the visible range.
+                        self.thumb_cache.retain(|p, _, r| {
+                            r == rot && (keep.contains(&p) || (p - self.page_index).abs() < 40)
+                        });
+                    });
+            });
+    }
+
+    /// Modal dialog asking for an encrypted document's password.
+    fn password_modal(&mut self, ctx: &egui::Context) {
+        let Some((path, mut input, failed)) = self.password_prompt.take() else {
+            return;
+        };
+        let mut submit = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("pdf-password")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.label(egui::RichText::new("Password required").strong());
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui.label(format!("“{name}” is encrypted."));
+            if failed {
+                ui.colored_label(ui.visuals().error_fg_color, "Wrong password — try again.");
+            }
+            ui.add_space(6.0);
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut input)
+                    .password(true)
+                    .hint_text("Password")
+                    .desired_width(f32::INFINITY),
+            );
+            edit.request_focus();
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                submit = true;
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open").clicked() {
+                    submit = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if submit && !input.is_empty() {
+            let pw = input.clone();
+            self.try_open(ctx, &path.clone(), Some(&pw), false);
+        } else if !cancel {
+            self.password_prompt = Some((path, input, failed));
+        }
+    }
+
+    /// Table-of-contents sidebar.
+    fn toc_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("toc")
+            .exact_size(230.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let weak = ui.visuals().weak_text_color();
+                        let mut jump_to: Option<i32> = None;
+                        for entry in &self.toc {
+                            ui.horizontal(|ui| {
+                                ui.add_space(6.0 + entry.depth as f32 * 12.0);
+                                match entry.page {
+                                    Some(page) => {
+                                        let current = page == self.page_index;
+                                        let text = egui::RichText::new(&entry.title).size(13.0);
+                                        let text =
+                                            if current { text.strong() } else { text };
+                                        if ui
+                                            .add(egui::Button::new(text).frame(false))
+                                            .on_hover_text(format!("Page {}", page + 1))
+                                            .clicked()
+                                        {
+                                            jump_to = Some(page);
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new(&entry.title)
+                                                .size(13.0)
+                                                .color(weak),
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                        if let Some(page) = jump_to {
+                            self.jump_with_history(page);
+                        }
+                    });
+            });
+    }
+
+    // ── landing page ─────────────────────────────────────────────────────────
+
+    fn landing(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let avail_w = ui.available_width();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(36.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("PaperView").size(30.0).strong());
+                    ui.label(
+                        egui::RichText::new("Fast, lightweight PDF viewing")
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.add_space(14.0);
+                    if ui
+                        .button(egui::RichText::new("  Open a PDF…  ").size(16.0))
+                        .clicked()
+                    {
+                        self.open_dialog(&ctx);
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Ctrl+O, or drop a file anywhere in this window")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                });
+                ui.add_space(22.0);
+
+                // Same column width on both tabs so the layout never jumps.
+                let col_w = 780.0_f32.min(avail_w - 24.0);
+                let pad = ((avail_w - col_w) * 0.5).max(12.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(pad);
+                    ui.vertical(|ui| {
+                        ui.set_width(col_w);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(
+                                    self.landing_tab == LandingTab::Recent,
+                                    "  Recent  ",
+                                )
+                                .clicked()
+                            {
+                                self.landing_tab = LandingTab::Recent;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.landing_tab == LandingTab::Saved,
+                                    "  Saved (cloud)  ",
+                                )
+                                .clicked()
+                            {
+                                self.landing_tab = LandingTab::Saved;
+                            }
+                        });
+                        ui.separator();
+                        ui.add_space(6.0);
+                        match self.landing_tab {
+                            LandingTab::Recent => self.landing_recent(ui, &ctx),
+                            LandingTab::Saved => self.landing_saved(ui, &ctx),
+                        }
+                    });
+                });
+                ui.add_space(24.0);
+            });
+    }
+
+    fn landing_recent(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let weak = ui.visuals().weak_text_color();
+        if self.recents.is_empty() {
+            ui.label(
+                egui::RichText::new("Nothing here yet — PDFs you open will appear here.")
+                    .color(weak),
+            );
+            return;
+        }
+        let mut open_req: Option<PathBuf> = None;
+        let mut remove_req: Option<usize> = None;
+        for (i, r) in self.recents.iter().enumerate() {
+            let exists = r.path.exists();
+            let name = r
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| r.path.display().to_string());
+            ui.horizontal(|ui| {
+                let title = if exists {
+                    egui::RichText::new(&name).size(14.5)
+                } else {
+                    egui::RichText::new(format!("{name} (missing)"))
+                        .size(14.5)
+                        .color(weak)
+                };
+                let btn = ui.add_enabled(exists, egui::Button::new(title).frame(false));
+                let btn = btn.on_hover_text(r.path.display().to_string());
+                if btn.clicked() {
+                    open_req = Some(r.path.clone());
+                }
+                let row_path = r.path.clone();
+                btn.context_menu(move |ui| {
+                    if ui.button("Open file location").clicked() {
+                        open_file_location(&row_path);
+                        ui.close();
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Remove from this list")
+                        .clicked()
+                    {
+                        remove_req = Some(i);
+                    }
+                    ui.label(egui::RichText::new(fmt_ts(r.ts)).small().color(weak));
+                });
+            });
+            ui.add_space(2.0);
+        }
+        if let Some(i) = remove_req {
+            self.recents.remove(i);
+        }
+        if let Some(p) = open_req {
+            self.open_path(ctx, &p);
+        }
+    }
+
+    fn landing_saved(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let weak = ui.visuals().weak_text_color();
+
+        if !self.cloud_cfg.ready() || self.show_cloud_settings {
+            ui.label(egui::RichText::new("Backblaze B2 storage").strong());
+            ui.add_space(4.0);
+            ui.label(
+                "PDFs you save land in a private B2 bucket (10 GB free). \
+                 Create a bucket plus an application key, then connect:",
+            );
+            ui.hyperlink("https://www.backblaze.com/sign-up/cloud-storage");
+            ui.add_space(8.0);
+            egui::Grid::new("b2-creds").num_columns(2).show(ui, |ui| {
+                ui.label("Key ID");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cloud_cfg.key_id)
+                        .hint_text("e.g. 005…0001 — the key's ID")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+                ui.label("Application key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cloud_cfg.app_key)
+                        .password(true)
+                        .hint_text("secret starting with K… (shown once at creation)")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+                ui.label("Bucket name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cloud_cfg.bucket)
+                        .hint_text("exact bucket name")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+            });
+            let key = self.cloud_cfg.app_key.trim();
+            if !key.is_empty() && !key.starts_with('K') {
+                ui.add_space(2.0);
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "⚠ That looks like a key ID, not the application key — the secret \
+                     starts with “K” and is only shown when the key is created. \
+                     Create a new key if you didn't copy it.",
+                );
+            }
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Stored locally, in plain text, in PaperView's settings file.",
+                )
+                .small()
+                .color(weak),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(self.cloud_cfg.ready(), egui::Button::new("Connect"))
+                    .clicked()
+                {
+                    self.show_cloud_settings = false;
+                    self.cloud_listed = false;
+                    self.cloud_status = None;
+                    self.start_cloud_op(ctx, CloudOp::List);
+                }
+                if self.show_cloud_settings && ui.button("Cancel").clicked() {
+                    self.show_cloud_settings = false;
+                }
+                if let Some(s) = &self.cloud_status {
+                    ui.colored_label(ui.visuals().error_fg_color, s);
+                }
+            });
+            return;
+        }
+
+        // Auto-list once (errors stop the retry until Refresh/Connect).
+        if !self.cloud_listed && !self.cloud_busy && self.cloud_status.is_none() {
+            self.start_cloud_op(ctx, CloudOp::List);
+        }
+
+        ui.horizontal(|ui| {
+            if self.cloud_busy {
+                ui.spinner();
+            }
+            if let Some(s) = &self.cloud_status {
+                ui.label(s.clone());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Settings").clicked() {
+                    self.show_cloud_settings = true;
+                }
+                if ui
+                    .add_enabled(!self.cloud_busy, egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    self.cloud_listed = false;
+                    self.cloud_status = None;
+                    self.start_cloud_op(ctx, CloudOp::List);
+                }
+                if ui
+                    .add_enabled(!self.cloud_busy, egui::Button::new("Upload a PDF…"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PDF documents", &["pdf"])
+                        .pick_file()
+                    {
+                        self.start_cloud_op(ctx, CloudOp::Upload(path));
+                    }
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        // Stats sidebar on the left, file list on the right.
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(232.0);
+                self.cloud_stats_card(ui);
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                if self.cloud_files.is_empty() && self.cloud_listed && !self.cloud_busy {
+                    ui.label(
+                        egui::RichText::new(
+                            "No PDFs saved yet — open one and press Save to cloud, \
+                             drop PDFs here, or upload above.",
+                        )
+                        .color(weak),
+                    );
+                    return;
+                }
+                let selected_n = self.cloud_selected.len();
+                if selected_n > 0 {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{selected_n} selected"));
+                        if ui
+                            .add_enabled(!self.cloud_busy, egui::Button::new("Download"))
+                            .on_hover_text("Download all selected (skips already-cached)")
+                            .clicked()
+                        {
+                            let items: Vec<(String, u64)> = self
+                                .cloud_files
+                                .iter()
+                                .filter(|f| {
+                                    self.cloud_selected.contains(&f.name)
+                                        && !cloud::local_path_for(&f.name).exists()
+                                })
+                                .map(|f| (f.name.clone(), f.size))
+                                .collect();
+                            for (name, size) in items {
+                                self.start_cloud_op(ctx, CloudOp::Download(name, size, false));
+                            }
+                        }
+                        let arming = self
+                            .confirm_delete_until
+                            .is_some_and(|t| Instant::now() < t);
+                        if arming {
+                            // Keep repainting so the countdown label ticks.
+                            ui.ctx().request_repaint_after(Duration::from_millis(200));
+                        }
+                        let secs_left = self
+                            .confirm_delete_until
+                            .map(|t| {
+                                let remaining = t.saturating_duration_since(Instant::now());
+                                remaining.as_secs_f32()
+                            })
+                            .unwrap_or(0.0);
+                        let del_label = if arming {
+                            format!("Confirm delete {selected_n}? ({secs_left:.0}s)")
+                        } else {
+                            "Delete".to_string()
+                        };
+                        if ui
+                            .add_enabled(!self.cloud_busy, egui::Button::new(del_label))
+                            .on_hover_text("Permanently deletes from the bucket")
+                            .clicked()
+                        {
+                            if arming {
+                                let items: Vec<(String, String)> = self
+                                    .cloud_files
+                                    .iter()
+                                    .filter(|f| self.cloud_selected.contains(&f.name))
+                                    .map(|f| (f.name.clone(), f.file_id.clone()))
+                                    .collect();
+                                if !items.is_empty() {
+                                    self.start_cloud_op(ctx, CloudOp::Delete(items));
+                                }
+                                self.confirm_delete_until = None;
+                            } else {
+                                self.confirm_delete_until =
+                                    Some(Instant::now() + Duration::from_secs(4));
+                            }
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.cloud_selected.clear();
+                            self.confirm_delete_until = None;
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+
+                // Collect file data first so we can borrow &mut self freely in the loop.
+                let file_data: Vec<(String, u64, i64, PathBuf)> = self
+                    .cloud_files
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            f.size,
+                            f.uploaded_ms,
+                            cloud::local_path_for(&f.name),
+                        )
+                    })
+                    .collect();
+                for (name, size, uploaded_ms, local) in &file_data {
+                    ui.horizontal(|ui| {
+                        let mut sel = self.cloud_selected.contains(name.as_str());
+                        if ui.checkbox(&mut sel, "").changed() {
+                            if sel {
+                                self.cloud_selected.insert(name.clone());
+                            } else {
+                                self.cloud_selected.remove(name);
+                            }
+                            self.confirm_delete_until = None;
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(name).size(14.0));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} — {}",
+                                    cloud::fmt_size(*size),
+                                    fmt_ts(uploaded_ms / 1000)
+                                ))
+                                .small()
+                                .color(weak),
+                            );
+                        });
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if local.exists() {
+                                    if ui.button("Open").clicked() {
+                                        self.open_path(ctx, local);
+                                    }
+                                } else if ui
+                                    .add_enabled(
+                                        !self.cloud_busy,
+                                        egui::Button::new("Download"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_cloud_op(
+                                        ctx,
+                                        CloudOp::Download(name.clone(), *size, true),
+                                    );
+                                }
+                            },
+                        );
+                    });
+                    ui.add_space(3.0);
+                }
+            });
+        });
+    }
+
+    /// The stats sidebar of the Saved tab.
+    fn cloud_stats_card(&mut self, ui: &mut egui::Ui) {
+        let weak = ui.visuals().weak_text_color();
+        let used: u64 = self.cloud_files.iter().map(|f| f.size).sum();
+        let count = self.cloud_files.len();
+        let left = FREE_TIER_BYTES.saturating_sub(used);
+        let frac = (used as f32 / FREE_TIER_BYTES as f32).clamp(0.0, 1.0);
+        let largest = self.cloud_files.iter().max_by_key(|f| f.size);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+
+            ui.label(egui::RichText::new("Bucket").small().color(weak));
+            ui.label(egui::RichText::new(self.cloud_cfg.bucket.trim()).strong());
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Storage").small().color(weak));
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .text(format!("{} used", cloud::fmt_size(used))),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} left of {} (free tier)",
+                    cloud::fmt_size(left),
+                    cloud::fmt_size(FREE_TIER_BYTES)
+                ))
+                .small()
+                .color(weak),
+            );
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Files").small().color(weak));
+            ui.label(format!("{count} saved"));
+            if let Some(f) = largest {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "largest: {} ({})",
+                        f.name,
+                        cloud::fmt_size(f.size)
+                    ))
+                    .small()
+                    .color(weak),
+                );
+            }
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Local cache").small().color(weak));
+            ui.label(format!(
+                "{} file{} · {}",
+                self.cloud_cache.0,
+                if self.cloud_cache.0 == 1 { "" } else { "s" },
+                cloud::fmt_size(self.cloud_cache.1)
+            ));
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Transfers").small().color(weak));
+            match self.cloud_last_dl {
+                Some((bps, ts)) => {
+                    ui.label(format!("down: {} (at {})", fmt_speed(bps), fmt_time(ts)))
+                }
+                None => ui.label(egui::RichText::new("no downloads yet").color(weak)),
+            };
+            match self.cloud_last_ul {
+                Some((bps, ts)) => {
+                    ui.label(format!("up: {} (at {})", fmt_speed(bps), fmt_time(ts)))
+                }
+                None => ui.label(egui::RichText::new("no uploads yet").color(weak)),
+            };
+
+            if let Some((done, total, bps)) = self.cloud_progress {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / total.max(1) as f32).text(format!(
+                        "{} / {} — {}",
+                        cloud::fmt_size(done),
+                        cloud::fmt_size(total),
+                        fmt_speed(bps)
+                    )),
+                );
+            }
+
+            if let Some(ts) = self.cloud_refreshed {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("refreshed at {}", fmt_time(ts)))
+                        .small()
+                        .color(weak),
+                );
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.checkbox(&mut self.auto_save, "Auto-save opened PDFs")
+                .on_hover_text(
+                    "Every PDF you open is uploaded here automatically \
+                     (unless it is bigger than the limit or already saved).",
+                );
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("up to").small().color(weak));
+                ui.add_enabled(
+                    self.auto_save,
+                    egui::DragValue::new(&mut self.auto_save_mb).range(1..=500),
+                );
+                ui.label(egui::RichText::new("MB").small().color(weak));
+            });
+        });
+    }
+
+    // ── page views ───────────────────────────────────────────────────────────
+
+    fn central(&mut self, ui: &mut egui::Ui) {
+        let canvas = if self.doc.is_none() {
+            ui.visuals().panel_fill // landing page sits on the normal background
+        } else if ui.visuals().dark_mode {
+            egui::Color32::from_gray(32)
+        } else {
+            egui::Color32::from_gray(200)
+        };
+        let frame = egui::Frame::NONE.fill(canvas);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            if let Some(msg) = &self.engine_error {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new(msg).size(15.0));
+                });
+                return;
+            }
+            if self.doc.is_none() {
+                self.landing(ui);
+                return;
+            }
+            if self.page_sizes.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("This document has no pages.");
+                });
+                return;
+            }
+            match self.mode {
+                ViewMode::Continuous => self.continuous_view(ui),
+                ViewMode::Single => self.single_view(ui),
+            }
+        });
+    }
+
+    /// Page size in points as *displayed* (swapped when rotated 90/270 deg).
+    fn display_size(&self, page: i32) -> (f32, f32) {
+        let (w, h) = self.page_sizes[page as usize];
+        if self.rotation % 2 == 1 { (h, w) } else { (w, h) }
+    }
+
+    fn resolve_zoom(&mut self, avail: egui::Vec2) -> f32 {
+        let count = self.page_count();
+        if count == 0 {
+            return 1.0;
+        }
+        let idx = self.page_index.clamp(0, count - 1);
+        let (w_pt, h_pt) = self.display_size(idx);
+        let zoom = match self.zoom {
+            Zoom::Custom(z) => z,
+            Zoom::FitWidth => {
+                (avail.x - PAGE_GAP * 2.0).max(64.0) / (w_pt * PX_PER_PT)
+            }
+            Zoom::FitPage => {
+                let zw = (avail.x - PAGE_GAP * 2.0).max(64.0) / (w_pt * PX_PER_PT);
+                let zh = (avail.y - PAGE_GAP * 2.0).max(64.0) / (h_pt * PX_PER_PT);
+                zw.min(zh)
+            }
+        }
+        .clamp(MIN_ZOOM, MAX_ZOOM);
+        self.effective_zoom = zoom;
+        zoom
+    }
+
+    /// Builds the scroll area, applying any pending jump or zoom-anchor
+    /// offset adjustment.
+    fn scrolled(&mut self, layout: &Layout, avail: egui::Vec2, continuous: bool) -> egui::ScrollArea {
+        let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]);
+
+        let rect_for = |page: i32| -> egui::Rect {
+            if continuous {
+                layout.rects[page.clamp(0, layout.rects.len() as i32 - 1) as usize]
+            } else {
+                layout.rects[0]
+            }
+        };
+
+        if let Some(target) = self.scroll_to.take() {
+            let (y, x) = match target {
+                ScrollTarget::Offset(o) => (o.y.max(0.0), Some(o.x.max(0.0))),
+                ScrollTarget::PageTop(p) => ((rect_for(p).min.y - PAGE_GAP).max(0.0), None),
+                ScrollTarget::PageBottom(p) => {
+                    ((rect_for(p).max.y + PAGE_GAP - avail.y).max(0.0), None)
+                }
+                ScrollTarget::Hit(p, h) => {
+                    let r = rect_for(p);
+                    if let Some(hit) = self.search.hit_rects(p, h) {
+                        let s = PX_PER_PT * self.effective_zoom;
+                        let (upw, uph) = self.page_sizes[p as usize];
+                        let hr = rect_to_view(hit.rects[0], self.rotation, upw, uph);
+                        let y = (r.min.y + hr.y * s - avail.y * 0.35).max(0.0);
+                        let x = if layout.content.x > avail.x {
+                            Some((r.min.x + hr.x * s - avail.x * 0.5).max(0.0))
+                        } else {
+                            None
+                        };
+                        (y, x)
+                    } else {
+                        (r.min.y.max(0.0), None)
+                    }
+                }
+            };
+            scroll = scroll.vertical_scroll_offset(y);
+            if let Some(x) = x {
+                scroll = scroll.horizontal_scroll_offset(x);
+            }
+            self.zoom_prev_effective = None;
+            self.zoom_anchor = None;
+        } else if self.pending_scroll != 0.0 {
+            let delta = std::mem::take(&mut self.pending_scroll);
+            scroll = scroll.vertical_scroll_offset((self.last_offset.y + delta).max(0.0));
+            self.zoom_prev_effective = None;
+        } else if let Some(prev) = self.zoom_prev_effective.take() {
+            let factor = self.effective_zoom / prev.max(1e-6);
+            if (factor - 1.0).abs() > 1e-4 {
+                let anchor = self.zoom_anchor.take().unwrap_or(avail * 0.5);
+                let new_off = (self.last_offset + anchor) * factor - anchor;
+                scroll = scroll
+                    .vertical_scroll_offset(new_off.y.max(0.0))
+                    .horizontal_scroll_offset(new_off.x.max(0.0));
+            } else {
+                self.zoom_anchor = None;
+            }
+        }
+        scroll
+    }
+
+    fn continuous_view(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let ppp = ctx.pixels_per_point();
+        let avail = ui.available_size();
+        let zoom = self.resolve_zoom(avail);
+        let sizes_disp: Vec<(f32, f32)> = (0..self.page_count())
+            .map(|i| self.display_size(i))
+            .collect();
+        let layout = view::layout_pages(&sizes_disp, zoom, avail.x);
+        let scroll = self
+            .scrolled(&layout, avail, true)
+            .scroll_source(ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR);
+
+        let out = scroll.show_viewport(ui, |ui, viewport| {
+            ui.set_min_size(layout.content);
+            let origin = ui.min_rect().min;
+            let first = layout
+                .rects
+                .partition_point(|r| r.max.y < viewport.min.y - 300.0);
+            let mut visible: Vec<i32> = Vec::new();
+            let mut on_screen: Vec<(i32, egui::Rect)> = Vec::new();
+            for (i, r) in layout.rects.iter().enumerate().skip(first) {
+                if r.min.y > viewport.max.y + 300.0 {
+                    break;
+                }
+                visible.push(i as i32);
+                let screen = r.translate(origin.to_vec2());
+                on_screen.push((i as i32, screen));
+                self.paint_page(ui, i as i32, screen, ppp);
+            }
+            let content = egui::Rect::from_min_size(origin, layout.content);
+            self.selection_ui(ui, &on_screen, content);
+            visible
+        });
+
+        let visible = out.inner;
+        self.last_offset = out.state.offset;
+        self.central_rect = out.inner_rect;
+
+        // Track which page the viewport center is on (indicator only — no
+        // scroll side effects).
+        if self.scroll_to.is_none() {
+            let cy = out.state.offset.y + out.inner_rect.height() * 0.5;
+            if let Some(p) = layout
+                .rects
+                .iter()
+                .position(|r| cy >= r.min.y - PAGE_GAP && cy <= r.max.y + PAGE_GAP)
+            {
+                self.page_index = p as i32;
+            }
+        }
+
+        // Evict textures for far-away pages; during a zoom gesture keep stale
+        // resolutions around for stretching.
+        let gesture = self.zoom_gesture_active();
+        let keep: HashSet<i32> = visible
+            .iter()
+            .flat_map(|&p| [p - 1, p, p + 1])
+            .filter(|&p| p >= 0)
+            .collect();
+        let rects = &layout.rects;
+        let rot_now = self.rotation % 4;
+        self.cache.retain(|p, px, r| {
+            if !keep.contains(&p) || r != rot_now {
+                return false;
+            }
+            if gesture {
+                return true;
+            }
+            let wanted = ((rects[p as usize].width() * ppp).round() as i32)
+                .clamp(16, MAX_TEXTURE_DIM);
+            px == wanted
+        });
+    }
+
+    fn single_view(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let ppp = ctx.pixels_per_point();
+        let avail = ui.available_size();
+        let zoom = self.resolve_zoom(avail);
+        let page = self.page_index.clamp(0, self.page_count().saturating_sub(1).max(0));
+        let size_pt = self.display_size(page);
+        let layout = view::layout_single(size_pt, zoom, avail);
+        let scroll = self
+            .scrolled(&layout, avail, false)
+            .scroll_source(ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR);
+
+        let out = scroll.show_viewport(ui, |ui, _viewport| {
+            ui.set_min_size(layout.content);
+            let origin = ui.min_rect().min;
+            let rect = layout.rects[0].translate(origin.to_vec2());
+            self.paint_page(ui, page, rect, ppp);
+            let content = egui::Rect::from_min_size(origin, layout.content);
+            self.selection_ui(ui, &[(page, rect)], content);
+        });
+
+        self.last_offset = out.state.offset;
+        self.central_rect = out.inner_rect;
+
+        // Sumatra-style: wheeling past the bottom (or top) flips the page.
+        let count = self.page_count();
+        let at_bottom =
+            out.state.offset.y + out.inner_rect.height() >= out.content_size.y - 2.0;
+        let at_top = out.state.offset.y <= 2.0;
+        self.last_at_bottom = at_bottom;
+        self.last_at_top = at_top;
+        let cooled = self
+            .last_edge_flip
+            .is_none_or(|t| t.elapsed() > EDGE_FLIP_COOLDOWN);
+        if cooled && self.wheel_y < -1.5 && at_bottom && page + 1 < count {
+            self.page_index = page + 1;
+            self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+            self.last_edge_flip = Some(Instant::now());
+        } else if cooled && self.wheel_y > 1.5 && at_top && page > 0 {
+            self.page_index = page - 1;
+            self.scroll_to = Some(ScrollTarget::PageBottom(self.page_index));
+            self.last_edge_flip = Some(Instant::now());
+        }
+
+        let gesture = self.zoom_gesture_active();
+        let wanted = ((layout.rects[0].width() * ppp).round() as i32).clamp(16, MAX_TEXTURE_DIM);
+        let rot_now = self.rotation % 4;
+        self.cache.retain(|p, px, r| {
+            (p - page).abs() <= 1 && r == rot_now && (gesture || px == wanted)
+        });
+    }
+
+    fn paint_page(&mut self, ui: &mut egui::Ui, page: i32, rect: egui::Rect, ppp: f32) {
+        let ctx = ui.ctx().clone();
+        let mut px_w = (rect.width() * ppp).round() as i32;
+        px_w = px_w.clamp(16, MAX_TEXTURE_DIM);
+        let est_h = (px_w as f32 * rect.height() / rect.width().max(1.0)) as i32;
+        if est_h > MAX_TEXTURE_DIM {
+            px_w = (MAX_TEXTURE_DIM as f32 * rect.width() / rect.height()).floor() as i32;
+        }
+
+        let rot = self.rotation % 4;
+        let gesture = self.zoom_gesture_active();
+        let tex = if let Some(t) = self.cache.get(page, px_w, rot) {
+            Some(t)
+        } else if gesture {
+            // Don't re-render mid-gesture: stretch whatever we have, and make
+            // sure a frame runs after the gesture settles to render sharp.
+            ctx.request_repaint_after(ZOOM_SETTLE);
+            self.cache
+                .any_for_page(page, rot)
+                .or_else(|| self.render_now(&ctx, page, px_w))
+        } else {
+            self.render_now(&ctx, page, px_w)
+        };
+
+        let Some((id, tex_size)) = tex else { return };
+        // Paint on the physical-pixel grid, at the texture's exact size:
+        // sub-pixel offsets or stretch make bilinear sampling smear glyphs at
+        // fractional zoom levels (e.g. 88 %). A stale texture stretched
+        // mid-gesture intentionally fills the layout rect instead.
+        let exact = (tex_size.x as i32 - px_w).abs() <= 1;
+        let paint_rect = if exact {
+            let min = ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
+            egui::Rect::from_min_size(min, tex_size / ppp)
+        } else {
+            rect
+        };
+        ui.painter().image(
+            id,
+            paint_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+
+        #[cfg(debug_assertions)]
+        if !self.announced_first_frame {
+            self.announced_first_frame = true;
+            eprintln!(
+                "paperview: displayed page {} ({}x{} px)",
+                page + 1,
+                px_w,
+                est_h.min(MAX_TEXTURE_DIM)
+            );
+        }
+
+        // Text-selection highlight.
+        let (upw, uph) = self.page_sizes[page as usize];
+        if let Some(sel_rects) = self.sel_rects_for(page) {
+            let s = PX_PER_PT * self.effective_zoom;
+            for hr in sel_rects {
+                let hr = rect_to_view(hr, rot, upw, uph);
+                let r = egui::Rect::from_min_size(
+                    paint_rect.min + egui::vec2(hr.x, hr.y) * s,
+                    egui::vec2(hr.w, hr.h) * s,
+                );
+                ui.painter().rect_filled(
+                    r.expand(1.0),
+                    egui::CornerRadius::same(1),
+                    egui::Color32::from_rgba_unmultiplied(70, 140, 255, 80),
+                );
+            }
+        }
+
+        // Search highlights.
+        if let Some(hits) = self.search.hits_for_page(page) {
+            let s = PX_PER_PT * self.effective_zoom;
+            for (i, hit) in hits.iter().enumerate() {
+                let is_current = self.search.is_current(page, i);
+                for hr in &hit.rects {
+                    let hr = rect_to_view(*hr, rot, upw, uph);
+                    let r = egui::Rect::from_min_size(
+                        paint_rect.min + egui::vec2(hr.x, hr.y) * s,
+                        egui::vec2(hr.w, hr.h) * s,
+                    );
+                    let fill = if is_current {
+                        egui::Color32::from_rgba_unmultiplied(255, 140, 0, 110)
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(255, 235, 0, 80)
+                    };
+                    ui.painter()
+                        .rect_filled(r.expand(1.5), egui::CornerRadius::same(2), fill);
+                }
+            }
+        }
+    }
+
+    fn render_now(
+        &mut self,
+        ctx: &egui::Context,
+        page: i32,
+        px_w: i32,
+    ) -> Option<(egui::TextureId, egui::Vec2)> {
+        let rot = self.rotation % 4;
+        let doc = self.doc.as_ref()?;
+        match self.cache.render_into(ctx, doc, page, px_w, rot, "page") {
+            Ok(t) => Some(t),
+            Err(e) => {
+                self.status = Some(e);
+                None
+            }
+        }
+    }
+}
+
+impl eframe::App for ViewerApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // Defer showing the window until the second frame.  On frame 1 the
+        // content is painted into the backbuffer but hasn't been swapped to
+        // screen yet.  Sending Visible(true) during frame 1 would briefly
+        // show a blank/stale buffer.  By frame 2 the first frame's content
+        // is on-screen, so the reveal is seamless.
+        if !self.shown {
+            if self.frame_nr > 0 {
+                self.shown = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            self.frame_nr += 1;
+            ctx.request_repaint(); // ensure frame 2 runs immediately
+        }
+
+        // Remember the Win32 window handle for parenting native dialogs.
+        if self.hwnd == 0 {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = handle.as_raw() {
+                    self.hwnd = w.hwnd.get();
+                }
+            }
+        }
+
+        // Drain print-worker events.
+        if let Some(rx) = &self.print_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    PrintEvent::Status(s) => self.status = Some(s),
+                    PrintEvent::Done(pages) => {
+                        self.status = Some(format!(
+                            "Printed {pages} page{}",
+                            if pages == 1 { "" } else { "s" }
+                        ));
+                        self.printing = false;
+                    }
+                    PrintEvent::Error(e) => {
+                        self.status = Some(format!("Print failed: {e}"));
+                        self.printing = false;
+                    }
+                }
+            }
+        }
+
+        // Drain cloud-worker events.
+        let mut open_after: Option<PathBuf> = None;
+        let mut relist = false;
+        if let Some(rx) = &self.cloud_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    CloudEvent::Status(s) => self.cloud_status = Some(s),
+                    CloudEvent::Error(e) => {
+                        self.cloud_status = Some(e);
+                        self.cloud_busy = false;
+                        self.cloud_progress = None;
+                    }
+                    CloudEvent::Files(files) => {
+                        self.cloud_files = files;
+                        self.cloud_listed = true;
+                        self.cloud_busy = false;
+                        self.cloud_status = None;
+                        self.cloud_refreshed = Some(now_ts());
+                        self.cloud_cache = cloud::cache_stats();
+                    }
+                    CloudEvent::Progress { done, total, bps } => {
+                        self.cloud_progress = Some((done, total, bps));
+                    }
+                    CloudEvent::Downloaded { path, bytes, secs, open } => {
+                        self.cloud_busy = false;
+                        self.cloud_status = None;
+                        self.cloud_progress = None;
+                        self.cloud_last_dl =
+                            Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                        self.cloud_cache = cloud::cache_stats();
+                        if open {
+                            open_after = Some(path);
+                        }
+                    }
+                    CloudEvent::UploadDone { name, bytes, secs } => {
+                        self.cloud_busy = false;
+                        self.cloud_status = Some(format!("Uploaded {name}"));
+                        self.cloud_progress = None;
+                        self.cloud_last_ul =
+                            Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                        // Refresh once the whole queue is done.
+                        relist = self.cloud_queue.is_empty();
+                    }
+                    CloudEvent::Deleted(n) => {
+                        self.cloud_busy = false;
+                        self.cloud_status =
+                            Some(format!("Deleted {n} file{}", if n == 1 { "" } else { "s" }));
+                        self.cloud_selected.clear();
+                        relist = self.cloud_queue.is_empty();
+                    }
+                }
+            }
+        }
+        // Run the next queued op, or refresh the listing after a batch.
+        if !self.cloud_busy {
+            if let Some(op) = self.cloud_queue.pop_front() {
+                self.start_cloud_op(&ctx, op);
+            } else if relist {
+                self.cloud_listed = false;
+                self.start_cloud_op(&ctx, CloudOp::List);
+            }
+        }
+        if let Some(path) = open_after {
+            self.open_path(&ctx, &path);
+        }
+
+        // Advance an in-progress search scan a little each frame.
+        let pumped = match &self.doc {
+            Some(doc) => self.search.pump(doc),
+            None => false,
+        };
+        if pumped {
+            ctx.request_repaint();
+        }
+        if let Some((page, hit)) = self.search.autoselect() {
+            self.page_index = page;
+            self.scroll_to = Some(ScrollTarget::Hit(page, hit));
+        }
+
+        self.handle_input(&ctx);
+        self.password_modal(&ctx);
+        self.print_preview_modal(&ctx);
+        self.toolbar(ui);
+        self.status_bar(ui);
+        if self.doc.is_some() {
+            match self.sidebar {
+                SidebarMode::Thumbs => self.thumbs_panel(ui),
+                SidebarMode::Toc => self.toc_panel(ui),
+                SidebarMode::Hidden => {}
+            }
+        }
+        self.central(ui);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.stash_doc_state();
+        storage.set_string(
+            "mode",
+            match self.mode {
+                ViewMode::Continuous => "continuous",
+                ViewMode::Single => "single",
+            }
+            .to_string(),
+        );
+        storage.set_string(
+            "sidebar",
+            match self.sidebar {
+                SidebarMode::Hidden => "hidden",
+                SidebarMode::Thumbs => "thumbs",
+                SidebarMode::Toc => "toc",
+            }
+            .to_string(),
+        );
+        storage.set_string(
+            "theme",
+            match self.theme {
+                ThemeChoice::System => "system",
+                ThemeChoice::Light => "light",
+                ThemeChoice::Dark => "dark",
+            }
+            .to_string(),
+        );
+        storage.set_string("zoom", zoom_to_str(self.zoom));
+        storage.set_string("recents", encode_recents(&self.recents));
+        storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());
+        storage.set_string("b2_app_key", self.cloud_cfg.app_key.clone());
+        storage.set_string("b2_bucket", self.cloud_cfg.bucket.clone());
+        storage.set_string("auto_save", if self.auto_save { "1" } else { "0" }.to_string());
+        storage.set_string("auto_save_mb", self.auto_save_mb.to_string());
+        storage.set_string(
+            "open_tabs",
+            self.tabs
+                .iter()
+                .map(|t| t.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recents_roundtrip() {
+        let list = vec![
+            Recent {
+                path: PathBuf::from(r"C:\docs\a.pdf"),
+                ts: 1_700_000_000,
+                page: 41,
+                zoom: Zoom::Custom(1.5),
+                rotation: 3,
+            },
+            Recent {
+                path: PathBuf::from(r"C:\with space\b (final).pdf"),
+                ts: 1,
+                page: 0,
+                zoom: Zoom::FitPage,
+                rotation: 0,
+            },
+        ];
+        let decoded = decode_recents(&encode_recents(&list));
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].path, list[0].path);
+        assert_eq!(decoded[0].ts, 1_700_000_000);
+        assert_eq!(decoded[0].page, 41);
+        assert_eq!(decoded[0].rotation, 3);
+        assert!(matches!(decoded[0].zoom, Zoom::Custom(z) if (z - 1.5).abs() < 1e-4));
+        assert_eq!(decoded[1].path, list[1].path);
+        assert!(matches!(decoded[1].zoom, Zoom::FitPage));
+
+        // Legacy v1 lines ("ts\tpath") still parse with defaults.
+        let legacy = decode_recents("123\tC:\\old.pdf");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].page, 0);
+        assert!(matches!(legacy[0].zoom, Zoom::FitPage));
+    }
+
+    #[test]
+    fn rotation_transforms_round_trip() {
+        use crate::pdf::HitRect;
+        let (w, h) = (612.0, 792.0);
+        let hr = HitRect {
+            x: 72.0,
+            y: 100.0,
+            w: 200.0,
+            h: 30.0,
+        };
+        for rot in 0..4u8 {
+            let v = rect_to_view(hr, rot, w, h);
+            // Dimensions swap on odd rotations.
+            if rot % 2 == 1 {
+                assert_eq!((v.w, v.h), (hr.h, hr.w), "rot {rot}");
+            } else {
+                assert_eq!((v.w, v.h), (hr.w, hr.h), "rot {rot}");
+            }
+            // The rect's center must round-trip through point_to_page.
+            let center_view = egui::vec2(v.x + v.w * 0.5, v.y + v.h * 0.5);
+            let center_page = point_to_page(center_view, rot, w, h);
+            assert!(
+                (center_page.x - (hr.x + hr.w * 0.5)).abs() < 0.01,
+                "rot {rot} cx"
+            );
+            assert!(
+                (center_page.y - (hr.y + hr.h * 0.5)).abs() < 0.01,
+                "rot {rot} cy"
+            );
+            // And stay inside the rotated page bounds.
+            let (vw, vh) = if rot % 2 == 1 { (h, w) } else { (w, h) };
+            assert!(v.x >= 0.0 && v.x + v.w <= vw, "rot {rot} x-bounds");
+            assert!(v.y >= 0.0 && v.y + v.h <= vh, "rot {rot} y-bounds");
+        }
+    }
+
+    #[test]
+    fn tab_index_fixup_after_remove() {
+        assert_eq!(fix_active_after_remove(Some(3), 1), Some(2));
+        assert_eq!(fix_active_after_remove(Some(1), 1), None);
+        assert_eq!(fix_active_after_remove(Some(0), 2), Some(0));
+        assert_eq!(fix_active_after_remove(None, 0), None);
+    }
+
+    #[test]
+    fn tab_titles_truncate() {
+        assert_eq!(truncate_title("short.pdf"), "short.pdf");
+        let long = "a-very-long-document-name-indeed.pdf";
+        let t = truncate_title(long);
+        assert!(t.chars().count() == 23 && t.ends_with('…'));
+    }
+
+    #[test]
+    fn auto_save_decision() {
+        let mb = 20;
+        assert!(should_auto_save(mb, 5 * 1024 * 1024, false, false));
+        assert!(should_auto_save(mb, 20 * 1024 * 1024, false, false)); // inclusive
+        assert!(!should_auto_save(mb, 20 * 1024 * 1024 + 1, false, false));
+        assert!(!should_auto_save(mb, 1024, true, false)); // from cache
+        assert!(!should_auto_save(mb, 1024, false, true)); // already saved
+    }
+
+    #[test]
+    fn recents_skip_malformed() {
+        assert!(decode_recents("").is_empty());
+        assert!(decode_recents("no-tab-here").is_empty());
+        assert!(decode_recents("notanumber\tC:\\x.pdf").is_empty());
+        assert!(decode_recents("123\t").is_empty());
+        assert_eq!(decode_recents("123\tC:\\ok.pdf").len(), 1);
+    }
+}

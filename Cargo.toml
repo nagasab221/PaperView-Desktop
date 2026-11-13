@@ -1,0 +1,44 @@
+[package]
+name = "paperview"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight, fast-starting PDF viewer for Windows"
+
+[dependencies]
+# eframe 0.35 defaults to the wgpu backend; we swap it for glow (OpenGL) —
+# noticeably smaller binary and faster cold start, which is the whole point.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "persistence", # remember window geometry + last file between sessions
+    "wayland",     # no-ops on Windows, keeps Linux builds working
+    "x11",
+] }
+rfd = "0.17"
+# Landing page timestamps (already in the tree via pdfium-render).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Backblaze B2 "Saved" tab: blocking HTTP on worker threads — no async runtime.
+# native-tls = Windows Schannel: avoids rustls→ring, which needs a C compiler
+# this machine doesn't have.
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+base64 = "0.22"
+# Win32 window handle for parenting the print dialog (matches eframe/winit).
+raw-window-handle = "0.6"
+# default features pull in the `image` crate (incl. AVIF codecs) which we don't
+# need: PDFium hands us raw RGBA that goes straight into an egui texture.
+# `pdfium_latest` selects the newest PDFium API bindings and is required when
+# default features are off.
+pdfium-render = { version = "0.9", default-features = false, features = [
+    "thread_safe",
+    "pdfium_latest",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
