@@ -273,3 +273,13 @@ the reading position. Press and release inside one frame still counts as a tap.
 
 Use a throwaway `XDG_DATA_HOME`: eframe restores window size and scroll positions from
 its saved state, which makes click coordinates drift between runs.
+
+**Covers and big folders.** Covers are cached as PNGs in `$XDG_CACHE_HOME/paperview/covers`
+(keyed by path, size and mtime) by one worker thread with two queues: on-screen tiles
+first, folder preparation behind. Uploads are capped per frame, textures past 240 are
+evicted (they reload from disk), and shelves skip off-screen rows. Folders show a
+"Preparing covers" progress state until every cover is on disk.
+
+**Measuring.** `cargo build --profile perf` is release-optimised with the test driver
+compiled in; the driver's `perf start` / `perf stop` steps report frame times. Scrolling
+a 180-PDF folder: avg 16.7 ms, max ~18 ms per frame, first and later launches alike.

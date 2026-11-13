@@ -120,9 +120,37 @@ impl ViewerApp {
         }
     }
 
+    /// Re-reads the folders on a background thread; a big tree must never
+    /// stall a frame. Results land via [`Self::poll_folder_scan`].
     pub(super) fn rescan_folders(&mut self) {
-        self.folder_listings = self.folders.iter().map(|f| scan(f)).collect();
         self.folders_scanned = Some(Instant::now());
+        if self.folder_scan.is_some() {
+            return; // one at a time
+        }
+        let folders = self.folders.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(folders.iter().map(|f| scan(f)).collect::<Vec<_>>());
+        });
+        self.folder_scan = Some(rx);
+    }
+
+    pub(super) fn poll_folder_scan(&mut self) {
+        let Some(rx) = &self.folder_scan else { return };
+        match rx.try_recv() {
+            Ok(listings) => {
+                // Folders removed while scanning don't come back.
+                self.folder_listings =
+                    listings.into_iter().filter(|l| self.folders.contains(&l.root)).collect();
+                self.folder_scan = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.folder_scan = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    pub(super) fn scanning_folders(&self) -> bool {
+        self.folder_scan.is_some()
     }
 }
 

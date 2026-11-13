@@ -182,6 +182,24 @@ impl ViewerApp {
             self.toast("Downloaded documents cleared");
         }
 
+        let (cn, cbytes) = crate::covers::cache_stats();
+        let sub = format!(
+            "{cn} saved · {} — so the Library opens without re-rendering",
+            cloud::fmt_size(cbytes)
+        );
+        let mut clear_covers = false;
+        w::row(ui, false, Some("🖼"), "Cover thumbnails", Some(&sub), |ui| {
+            if w::inline_button(ui, "Clear", cn > 0).clicked() {
+                clear_covers = true;
+            }
+        });
+        w::hairline(ui);
+        if clear_covers {
+            crate::covers::clear_cache();
+            self.covers.forget_disk();
+            self.toast("Saved covers cleared; they'll be made again as needed");
+        }
+
         // ── System ───────────────────────────────────────────────────────────
         w::section_heading(ui, "System", |_| {});
         let (title, sub) = if cfg!(target_os = "windows") {

@@ -18,6 +18,10 @@ use crate::ui::{theme, widgets as w};
 const TILE_W: f32 = 150.0;
 const TILE_GAP: f32 = 24.0;
 const SMALL_TILE_W: f32 = 110.0;
+/// Room under a cover: gap, two title lines, the caption.
+const TILE_TEXT_H: f32 = 8.0 + 38.0 + 22.0;
+/// A list row and its rule.
+const LIST_ROW_H: f32 = 49.0;
 const SMALL_TILE_GAP: f32 = 18.0;
 /// Cover aspect (width / height), as on the phone.
 const COVER_ASPECT: f32 = 0.77;
@@ -254,6 +258,11 @@ impl ViewerApp {
         let mut open: Option<PathBuf> = None;
         let mut remove: Option<PathBuf> = None;
         let mut refresh = false;
+        if self.folder_listings.is_empty() && self.scanning_folders() {
+            loading_block(ui, "Reading your folders…", None);
+            ctx.request_repaint();
+            return;
+        }
         let listings = std::mem::take(&mut self.folder_listings);
         for listing in &listings {
             let root = listing.root.clone();
@@ -291,6 +300,17 @@ impl ViewerApp {
                 ui.label(RichText::new("No PDFs in this folder yet.").color(p.muted));
                 continue;
             }
+            // Covers are made in the background; show the shelf once they're
+            // all ready rather than letting it fill in tile by tile.
+            let paths: Vec<PathBuf> = listing.docs.iter().map(|d| d.path.clone()).collect();
+            let ready = self.covers.prepare(ctx, &paths);
+            if ready < paths.len() {
+                ui.add_space(12.0);
+                loading_block(ui, "Preparing covers…", Some((ready, paths.len())));
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                continue;
+            }
+            w::fade_in(ui, &format!("folder-{}", root.display()), true);
             // One shelf per subfolder, the folder's own files first.
             let mut start = 0;
             while start < listing.docs.len() {
@@ -383,8 +403,18 @@ impl ViewerApp {
         let tile_w = ((width - gap * (cols as f32 - 1.0)) / cols as f32).min(tile + 30.0);
         let mut open_req = None;
         let mut remove_req = None;
+        // Rows off screen are skipped, only their space reserved: a shelf of
+        // hundreds then costs what the visible rows cost.
+        let row_h = tile_w / COVER_ASPECT + TILE_TEXT_H;
         for (row, chunk) in tiles.chunks(cols).enumerate() {
+            let probe = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, row_h));
+            if !ui.is_rect_visible(probe) {
+                ui.allocate_space(egui::vec2(width, row_h));
+                ui.add_space(18.0);
+                continue;
+            }
             ui.horizontal_top(|ui| {
+                ui.set_height(row_h);
                 ui.spacing_mut().item_spacing.x = gap;
                 for (k, tile) in chunk.iter().enumerate() {
                     let (open, remove) = self.cover_tile(ui, ctx, tile, tile_w);
@@ -412,6 +442,11 @@ impl ViewerApp {
         let mut open_req = None;
         let mut remove_req = None;
         for (i, tile) in tiles.iter().enumerate() {
+            let probe = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), LIST_ROW_H));
+            if !ui.is_rect_visible(probe) {
+                ui.allocate_space(egui::vec2(ui.available_width(), LIST_ROW_H));
+                continue;
+            }
             let path = tile.path.as_path();
             let exists = path.exists();
             let name = path
@@ -532,18 +567,27 @@ impl ViewerApp {
             });
 
             ui.add_space(8.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&name)
-                        .family(theme::medium())
-                        .size(14.0)
-                        .color(if exists { p.ink } else { p.muted }),
-                )
-                .wrap()
-                .selectable(false),
+            // At most two lines, always two lines' room: every row is the
+            // same height, which is what lets off-screen rows be skipped.
+            let mut job = egui::text::LayoutJob::single_section(
+                name.clone(),
+                egui::TextFormat {
+                    font_id: egui::FontId::new(14.0, theme::medium()),
+                    color: if exists { p.ink } else { p.muted },
+                    ..Default::default()
+                },
             );
+            job.wrap = egui::text::TextWrapping {
+                max_width: tile_w,
+                max_rows: 2,
+                break_anywhere: false,
+                overflow_character: Some('…'),
+            };
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            let (title_rect, _) = ui.allocate_exact_size(egui::vec2(tile_w, 38.0), Sense::hover());
+            ui.painter().galley(title_rect.min, galley, p.ink);
             let meta = if exists { tile.meta.clone() } else { "File moved or deleted".to_string() };
-            ui.label(RichText::new(meta).small().color(p.muted));
+            ui.add(egui::Label::new(RichText::new(meta).small().color(p.muted)).truncate());
         });
         (open, remove)
     }
@@ -1072,6 +1116,55 @@ fn local_name(bucket_name: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// A spinner, a line of text and, when known, progress — while covers or a
+/// folder are being read in the background.
+fn loading_block(ui: &mut egui::Ui, text: &str, progress: Option<(usize, usize)>) {
+    let p = w::pal(ui);
+    ui.add_space(18.0);
+    ui.horizontal(|ui| {
+        spinner(ui, &p);
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            let line = match progress {
+                Some((done, total)) => format!("{text} {done} of {total}"),
+                None => text.to_string(),
+            };
+            ui.label(RichText::new(line).color(p.ink));
+            if let Some((done, total)) = progress {
+                let frac = done as f32 / total.max(1) as f32;
+                let shown = ui.ctx().animate_value_with_time(ui.id().with("progress"), frac, 0.25);
+                let (bar, _) = ui.allocate_exact_size(egui::vec2(260.0, 3.0), Sense::hover());
+                ui.painter().rect_filled(bar, 2, p.hairline);
+                let mut fill = bar;
+                fill.set_width(bar.width() * shown);
+                ui.painter().rect_filled(fill, 2, p.accent);
+                ui.label(
+                    RichText::new("Covers are saved, so this only happens the first time.")
+                        .small()
+                        .color(p.muted),
+                );
+            }
+        });
+    });
+    ui.add_space(18.0);
+}
+
+/// A small rotating arc in the accent colour.
+fn spinner(ui: &mut egui::Ui, p: &crate::ui::theme::Palette) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+    let t = ui.input(|i| i.time) as f32;
+    let start = t * 5.0;
+    let points: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let a = start + i as f32 / 24.0 * std::f32::consts::PI * 1.4;
+            rect.center() + egui::vec2(a.cos(), a.sin()) * 8.0
+        })
+        .collect();
+    ui.painter().circle_stroke(rect.center(), 8.0, Stroke::new(2.0, p.hairline));
+    ui.painter().add(egui::Shape::line(points, Stroke::new(2.0, p.accent)));
+    ui.ctx().request_repaint();
 }
 
 /// Small caption dividing the cloud list into on-device and bucket-only.

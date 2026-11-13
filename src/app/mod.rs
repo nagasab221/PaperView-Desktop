@@ -460,6 +460,7 @@ pub struct ViewerApp {
     folders: Vec<PathBuf>,
     folder_listings: Vec<folders::Listing>,
     folders_scanned: Option<Instant>,
+    folder_scan: Option<std::sync::mpsc::Receiver<Vec<folders::Listing>>>,
     /// Interface size (egui zoom) and the value the slider is showing.
     ui_scale: f32,
     ui_scale_draft: f32,
@@ -571,6 +572,7 @@ impl ViewerApp {
             folders: Vec::new(),
             folder_listings: Vec::new(),
             folders_scanned: None,
+            folder_scan: None,
             sidebar_last: SidebarMode::Thumbs,
             ui_scale: 1.0,
             ui_scale_draft: 1.0,
@@ -2457,6 +2459,7 @@ impl eframe::App for ViewerApp {
             ui.set_style(ctx.global_style());
         }
         self.covers.pump(&ctx);
+        self.poll_folder_scan();
         // Interface size: egui scales everything, and pages re-render sharp.
         if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.ui_scale);

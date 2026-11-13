@@ -25,6 +25,8 @@ ureq = { version = "3", default-features = false, features = ["native-tls", "gzi
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
+# Library covers are cached on disk as PNG (already in the tree via eframe).
+png = "0.18"
 base64 = "0.22"
 # Win32 window handle for parenting the print dialog (matches eframe/winit).
 raw-window-handle = "0.6"
@@ -42,3 +44,9 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Optimised like release, but with the debug-only UI test driver compiled in,
+# so performance can be measured on a realistic build.
+[profile.perf]
+inherits = "release"
+debug-assertions = true

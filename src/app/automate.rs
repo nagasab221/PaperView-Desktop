@@ -28,6 +28,8 @@ pub(super) struct Script {
     shots: PathBuf,
     pointer: Pos2,
     modifiers: Modifiers,
+    /// Frame times being recorded between `perf start` and `perf stop`.
+    perf: Option<Vec<f32>>,
 }
 
 impl Script {
@@ -43,6 +45,7 @@ impl Script {
                 .unwrap_or_else(std::env::temp_dir),
             pointer: Pos2::ZERO,
             modifiers: Modifiers::NONE,
+            perf: None,
         })
     }
 }
@@ -79,6 +82,9 @@ impl ViewerApp {
     pub(super) fn automate(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let Some(mut s) = self.automation.take() else { return };
         ctx.request_repaint();
+        if let Some(times) = &mut s.perf {
+            times.push(ctx.input(|i| i.unstable_dt));
+        }
 
         if let Some(name) = s.awaiting_shot.clone() {
             for ev in &raw.events {
@@ -240,6 +246,24 @@ impl ViewerApp {
                         self.ui_scale,
                         self.ui_scale_draft
                     );
+                }
+                Some("perf") => {
+                    if parts.get(1) == Some(&"start") {
+                        s.perf = Some(Vec::new());
+                    } else if let Some(mut t) = s.perf.take() {
+                        t.sort_by(|a, b| a.total_cmp(b));
+                        let n = t.len().max(1);
+                        let avg = t.iter().sum::<f32>() / n as f32;
+                        let p95 = t[(n * 95 / 100).min(n - 1)];
+                        let max = t.last().copied().unwrap_or(0.0);
+                        let slow = t.iter().filter(|d| **d > 1.0 / 30.0).count();
+                        eprintln!(
+                            "automate: perf frames={n} avg={:.1}ms p95={:.1}ms max={:.1}ms over33ms={slow}",
+                            avg * 1000.0,
+                            p95 * 1000.0,
+                            max * 1000.0
+                        );
+                    }
                 }
                 Some("dt") => {
                     eprintln!(
