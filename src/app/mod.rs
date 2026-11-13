@@ -2446,6 +2446,8 @@ impl eframe::App for ViewerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(debug_assertions)]
+        let frame_started = Instant::now();
         let ctx = ui.ctx().clone();
 
         // The look follows the chosen skin and light/dark (System tracks the OS).
@@ -2626,6 +2628,15 @@ impl eframe::App for ViewerApp {
         }
         self.central(ui);
         self.overlays(&ctx);
+        #[cfg(debug_assertions)]
+        if let Some(a) = &mut self.automation {
+            a.record_work(frame_started.elapsed().as_secs_f32());
+            // The previous frame's whole CPU time: our code plus tessellation
+            // and painting, texture uploads included.
+            if let Some(cpu) = frame.info().cpu_usage {
+                a.record_cpu(cpu);
+            }
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

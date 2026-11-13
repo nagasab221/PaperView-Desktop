@@ -8,7 +8,7 @@
 //! * `move X Y` · `click X Y` · `rclick X Y` · `press X Y` · `release X Y`
 //! * `drop PATH` — drop a file or folder onto the window
 //! * `type TEXT` — text input into the focused field
-//! * `scroll DY` — mouse wheel, logical points (negative scrolls down)
+//! * `scroll DY [MS]` — mouse wheel, logical points (negative scrolls down), then pause
 //! * `shot NAME` — save `NAME.ppm` (waits for the frame to be captured)
 //! * `dump` — print view and peek state to stderr
 //! * `quit`
@@ -30,6 +30,23 @@ pub(super) struct Script {
     modifiers: Modifiers,
     /// Frame times being recorded between `perf start` and `perf stop`.
     perf: Option<Vec<f32>>,
+    /// Time spent building each frame (our code, not vsync), same window.
+    work: Option<Vec<f32>>,
+    cpu: Option<Vec<f32>>,
+}
+
+impl Script {
+    pub fn record_cpu(&mut self, secs: f32) {
+        if let Some(c) = &mut self.cpu {
+            c.push(secs);
+        }
+    }
+
+    pub fn record_work(&mut self, secs: f32) {
+        if let Some(w) = &mut self.work {
+            w.push(secs);
+        }
+    }
 }
 
 impl Script {
@@ -46,6 +63,8 @@ impl Script {
             pointer: Pos2::ZERO,
             modifiers: Modifiers::NONE,
             perf: None,
+            work: None,
+            cpu: None,
         })
     }
 }
@@ -199,7 +218,8 @@ impl ViewerApp {
                         modifiers: s.modifiers,
                         phase: egui::TouchPhase::Move,
                     });
-                    s.wait_until = Some(Instant::now() + Duration::from_millis(200));
+                    let pause = parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(200);
+                    s.wait_until = Some(Instant::now() + Duration::from_millis(pause));
                     break;
                 }
                 Some("shot") => {
@@ -250,7 +270,33 @@ impl ViewerApp {
                 Some("perf") => {
                     if parts.get(1) == Some(&"start") {
                         s.perf = Some(Vec::new());
+                        s.work = Some(Vec::new());
+                        s.cpu = Some(Vec::new());
                     } else if let Some(mut t) = s.perf.take() {
+                        if let Some(mut c) = s.cpu.take() {
+                            c.sort_by(|a, b| a.total_cmp(b));
+                            let n = c.len().max(1);
+                            eprintln!(
+                                "automate: frame-cpu avg={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms over7ms={}",
+                                c.iter().sum::<f32>() / n as f32 * 1000.0,
+                                c[(n * 95 / 100).min(n - 1)] * 1000.0,
+                                c[(n * 99 / 100).min(n - 1)] * 1000.0,
+                                c.last().copied().unwrap_or(0.0) * 1000.0,
+                                c.iter().filter(|d| **d > 0.007).count(),
+                            );
+                        }
+                        if let Some(mut w) = s.work.take() {
+                            w.sort_by(|a, b| a.total_cmp(b));
+                            let n = w.len().max(1);
+                            eprintln!(
+                                "automate: work avg={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms over7ms={}",
+                                w.iter().sum::<f32>() / n as f32 * 1000.0,
+                                w[(n * 95 / 100).min(n - 1)] * 1000.0,
+                                w[(n * 99 / 100).min(n - 1)] * 1000.0,
+                                w.last().copied().unwrap_or(0.0) * 1000.0,
+                                w.iter().filter(|d| **d > 0.007).count(),
+                            );
+                        }
                         t.sort_by(|a, b| a.total_cmp(b));
                         let n = t.len().max(1);
                         let avg = t.iter().sum::<f32>() / n as f32;

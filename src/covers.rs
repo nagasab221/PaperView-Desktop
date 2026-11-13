@@ -23,8 +23,10 @@ use crate::pdf::PdfEngine;
 
 /// Cover width in pixels. Tiles are 110–180 logical px wide.
 pub const COVER_PX: i32 = 240;
-/// Uploads to the GPU per frame; the rest wait for the next frame.
-const UPLOADS_PER_FRAME: usize = 4;
+/// Uploads to the GPU per frame at most, and the time they may take; the rest
+/// wait for the next frame. Keeps even a 165 Hz frame (6 ms) comfortable.
+const UPLOADS_PER_FRAME: usize = 6;
+const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_micros(1500);
 /// Covers waiting to load; older requests (tiles scrolled past) are dropped.
 const MAX_QUEUED_LOADS: usize = 48;
 /// Textures kept in GPU memory before the least recently drawn are dropped.
@@ -145,10 +147,13 @@ enum Job {
 }
 
 enum Done {
-    Pixels(Key, usize, usize, Vec<u8>),
+    /// Ready for the GPU: converted to egui's format on the worker thread.
+    Pixels(Key, egui::ColorImage),
     /// On disk (or known to be unreadable); `ok` says which.
     Prepared(Key, bool),
     Failed(Key),
+    /// A background stat: the file's key, or None if it's gone.
+    Stat(PathBuf, Option<Key>),
 }
 
 #[derive(Default)]
@@ -196,7 +201,7 @@ fn worker(engine: PdfEngine, shared: Arc<Shared>, done: std::sync::mpsc::Sender<
         };
         let out = match job {
             Job::Load(key) => match produce(engine, &key, true) {
-                Some((w, h, px)) => Done::Pixels(key, w, h, px),
+                Some((w, h, px)) => Done::Pixels(key, egui::ColorImage::from_rgba_unmultiplied([w, h], &px)),
                 None => Done::Failed(key),
             },
             Job::Prepare(key) => {
@@ -233,14 +238,22 @@ pub struct Covers {
     /// Waiting for pixels.
     loading: HashSet<Key>,
     /// Finished renders not yet uploaded to the GPU.
-    pending_upload: VecDeque<(Key, usize, usize, Vec<u8>)>,
+    pending_upload: VecDeque<(Key, egui::ColorImage)>,
     /// Paths known to be on disk (or unreadable), for preparing folders.
     prepared: HashSet<PathBuf>,
     preparing: HashSet<PathBuf>,
-    /// Key per path, refreshed now and then rather than stat'ed every frame.
-    keys: HashMap<PathBuf, (Key, u64)>,
+    /// What's known about each file (present with its key, or missing) and
+    /// when it was learnt. Only ever filled from other threads — the folder
+    /// scan, or the stat thread — because on a busy USB hard disk a single
+    /// stat on the UI thread can freeze the window for a tenth of a second.
+    facts: HashMap<PathBuf, (Option<Key>, std::time::Instant)>,
+    stat_pending: HashSet<PathBuf>,
+    stat_tx: Option<std::sync::mpsc::Sender<PathBuf>>,
     frame: u64,
 }
+
+/// How long a file fact is trusted before it's quietly checked again.
+const FACT_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Covers {
     pub fn new(engine: Option<PdfEngine>) -> Self {
@@ -255,7 +268,9 @@ impl Covers {
             pending_upload: VecDeque::new(),
             prepared: HashSet::new(),
             preparing: HashSet::new(),
-            keys: HashMap::new(),
+            facts: HashMap::new(),
+            stat_pending: HashSet::new(),
+            stat_tx: None,
             frame: 0,
         }
     }
@@ -274,22 +289,79 @@ impl Covers {
         self.shared.clone()
     }
 
-    /// The file's key, re-read from disk at most every ~2 seconds.
-    fn key(&mut self, path: &Path) -> Option<Key> {
-        let frame = self.frame;
-        if let Some((k, at)) = self.keys.get(path) {
-            if frame.saturating_sub(*at) < 120 {
-                return Some(k.clone());
+    /// Records what a folder scan already learnt, so nothing has to stat it.
+    pub fn seed(&mut self, path: &Path, len: u64, modified: u64) {
+        let key = Key { path: path.to_path_buf(), len, modified };
+        self.facts.insert(path.to_path_buf(), (Some(key), std::time::Instant::now()));
+    }
+
+    /// Asks the stat thread about a file.
+    fn stat(&mut self, ctx: &egui::Context, path: &Path) {
+        if !self.stat_pending.insert(path.to_path_buf()) {
+            return;
+        }
+        if self.stat_tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+            let done = self.done_tx.clone();
+            let ctx = ctx.clone();
+            let spawned = std::thread::Builder::new().name("stat".into()).spawn(move || {
+                for path in rx {
+                    let key = Key::of(&path);
+                    if done.send(Done::Stat(path, key)).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+            if spawned.is_err() {
+                return;
+            }
+            self.stat_tx = Some(tx);
+        }
+        if let Some(tx) = &self.stat_tx {
+            let _ = tx.send(path.to_path_buf());
+        }
+    }
+
+    /// The file's key from what's known; checks again in the background when
+    /// unknown or stale. Never touches the disk itself.
+    fn key(&mut self, ctx: &egui::Context, path: &Path) -> Option<Key> {
+        match self.facts.get(path) {
+            Some((fact, at)) => {
+                let fact = fact.clone();
+                if at.elapsed() > FACT_TTL {
+                    self.stat(ctx, path);
+                }
+                fact
+            }
+            None => {
+                self.stat(ctx, path);
+                None
             }
         }
-        let k = Key::of(path)?;
-        self.keys.insert(path.to_path_buf(), (k.clone(), frame));
-        Some(k)
+    }
+
+    /// Whether the file exists, as far as is known. Unknown counts as yes —
+    /// the answer arrives from the background a moment later.
+    pub fn exists(&mut self, ctx: &egui::Context, path: &Path) -> bool {
+        match self.facts.get(path) {
+            Some((fact, at)) => {
+                let present = fact.is_some();
+                if at.elapsed() > FACT_TTL {
+                    self.stat(ctx, path);
+                }
+                present
+            }
+            None => {
+                self.stat(ctx, path);
+                true
+            }
+        }
     }
 
     /// The cover for a tile that is on screen; asks for it if it isn't loaded.
     pub fn get(&mut self, ctx: &egui::Context, path: &Path) -> Option<&Cover> {
-        let key = self.key(path)?;
+        let key = self.key(ctx, path)?;
         if self.textures.contains_key(&key) {
             let frame = self.frame;
             let e = self.textures.get_mut(&key)?;
@@ -313,6 +385,12 @@ impl Covers {
         None
     }
 
+    /// Loads a cover that is about to scroll into view, so it's on the GPU by
+    /// the time it's drawn instead of arriving in a burst with its neighbours.
+    pub fn warm(&mut self, ctx: &egui::Context, path: &Path) {
+        let _ = self.get(ctx, path);
+    }
+
     /// Makes sure every cover for `paths` is on disk, in the background.
     /// Returns how many are done so far.
     pub fn prepare(&mut self, ctx: &egui::Context, paths: &[PathBuf]) -> usize {
@@ -322,13 +400,18 @@ impl Covers {
             if self.prepared.contains(path) {
                 done += 1;
             } else if !self.preparing.contains(path) {
-                if let Some(k) = Key::of(path) {
-                    fresh.push(k);
-                    self.preparing.insert(path.clone());
-                } else {
+                match self.facts.get(path).map(|(k, _)| k.clone()) {
+                    Some(Some(k)) => {
+                        fresh.push(k);
+                        self.preparing.insert(path.clone());
+                    }
                     // Gone since the folder was read: nothing to wait for.
-                    self.prepared.insert(path.clone());
-                    done += 1;
+                    Some(None) => {
+                        self.prepared.insert(path.clone());
+                        done += 1;
+                    }
+                    // Not known yet: ask, and count it next time.
+                    None => self.stat(ctx, path),
                 }
             }
         }
@@ -352,10 +435,14 @@ impl Covers {
         self.frame += 1;
         while let Ok(done) = self.done_rx.try_recv() {
             match done {
-                Done::Pixels(key, w, h, px) => self.pending_upload.push_back((key, w, h, px)),
+                Done::Pixels(key, image) => self.pending_upload.push_back((key, image)),
                 Done::Prepared(key, _ok) => {
                     self.preparing.remove(&key.path);
                     self.prepared.insert(key.path);
+                }
+                Done::Stat(path, key) => {
+                    self.stat_pending.remove(&path);
+                    self.facts.insert(path, (key, std::time::Instant::now()));
                 }
                 Done::Failed(key) => {
                     self.loading.remove(&key);
@@ -364,9 +451,12 @@ impl Covers {
                 }
             }
         }
+        let started = std::time::Instant::now();
         for _ in 0..UPLOADS_PER_FRAME {
-            let Some((key, w, h, px)) = self.pending_upload.pop_front() else { break };
-            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &px);
+            if started.elapsed() > UPLOAD_BUDGET {
+                break;
+            }
+            let Some((key, image)) = self.pending_upload.pop_front() else { break };
             let tex = ctx.load_texture(
                 format!("cover-{}", key.path.display()),
                 image,

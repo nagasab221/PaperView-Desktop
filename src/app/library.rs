@@ -39,19 +39,38 @@ fn cover_uv(tex_size: [usize; 2], aspect: f32) -> egui::Rect {
     }
 }
 
-/// One document on a shelf.
+/// One document on a shelf. Its caption is only formatted when it's drawn.
 struct Tile {
     path: PathBuf,
-    meta: String,
+    /// Last opened (Recents) or modified (folders), unix seconds.
+    when: i64,
     /// Recents can be removed from the Library; folder files can't.
     removable: bool,
 }
 
-/// A date for shelf captions, e.g. "13 Nov 2026".
+/// A date for shelf captions, e.g. "13 Nov 2026". Remembered per day:
+/// local-time conversion isn't free, and a shelf asks for the same few dates
+/// over and over.
 fn fmt_date(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|utc| utc.with_timezone(&chrono::Local).format("%-d %b %Y").to_string())
-        .unwrap_or_default()
+    thread_local! {
+        static DAYS: std::cell::RefCell<std::collections::HashMap<i64, String>> = Default::default();
+    }
+    // Keyed by the UTC hour so a timezone's day boundary is still respected.
+    let hour = ts.div_euclid(3600);
+    DAYS.with(|d| {
+        d.borrow_mut()
+            .entry(hour)
+            .or_insert_with(|| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|utc| utc.with_timezone(&chrono::Local).format("%-d %b %Y").to_string())
+                    .unwrap_or_default()
+            })
+            .clone()
+    })
+}
+
+fn unix(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// A document already downloaded from the bucket.
@@ -230,11 +249,7 @@ impl ViewerApp {
         let tiles: Vec<Tile> = self
             .recents
             .iter()
-            .map(|r| Tile {
-                path: r.path.clone(),
-                meta: format!("page {} · {}", r.page + 1, fmt_date(r.ts)),
-                removable: true,
-            })
+            .map(|r| Tile { path: r.path.clone(), when: r.ts, removable: true })
             .collect();
         let (open, remove) = self.shelf(ui, ctx, &tiles);
         if let Some(i) = remove {
@@ -325,11 +340,7 @@ impl ViewerApp {
                 ui.add_space(14.0);
                 let tiles: Vec<Tile> = listing.docs[start..end]
                     .iter()
-                    .map(|d| Tile {
-                        meta: self.reading_note(&d.path, d.modified),
-                        path: d.path.clone(),
-                        removable: false,
-                    })
+                    .map(|d| Tile { path: d.path.clone(), when: unix(d.modified), removable: false })
                     .collect();
                 if let (Some(path), _) = self.shelf(ui, ctx, &tiles) {
                     open = Some(path);
@@ -369,16 +380,15 @@ impl ViewerApp {
         }
     }
 
-    /// "page 12" if the document has been read, otherwise its file date.
-    fn reading_note(&self, path: &std::path::Path, modified: std::time::SystemTime) -> String {
-        if let Some(r) = self.recents.iter().find(|r| r.path == path) {
-            return format!("page {} · {}", r.page + 1, fmt_date(r.ts));
+    /// The caption under a tile: where you are, if you've read it, else its date.
+    fn caption(&self, tile: &Tile, exists: bool) -> String {
+        if !exists {
+            return "File moved or deleted".to_string();
         }
-        let ts = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        fmt_date(ts)
+        match self.recents.iter().find(|r| r.path == tile.path) {
+            Some(r) => format!("page {} · {}", r.page + 1, fmt_date(r.ts)),
+            None => fmt_date(tile.when),
+        }
     }
 
     // ── Shelf ────────────────────────────────────────────────────────────────
@@ -406,9 +416,17 @@ impl ViewerApp {
         // Rows off screen are skipped, only their space reserved: a shelf of
         // hundreds then costs what the visible rows cost.
         let row_h = tile_w / COVER_ASPECT + TILE_TEXT_H;
+        // A screen above and below the view: covers there load ahead of time.
+        let clip = ui.clip_rect();
+        let near = clip.expand2(egui::vec2(0.0, clip.height()));
         for (row, chunk) in tiles.chunks(cols).enumerate() {
             let probe = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, row_h));
             if !ui.is_rect_visible(probe) {
+                if near.intersects(probe) {
+                    for tile in chunk {
+                        self.covers.warm(ctx, &tile.path);
+                    }
+                }
                 ui.allocate_space(egui::vec2(width, row_h));
                 ui.add_space(18.0);
                 continue;
@@ -441,19 +459,24 @@ impl ViewerApp {
         let p = w::pal(ui);
         let mut open_req = None;
         let mut remove_req = None;
+        let clip = ui.clip_rect();
+        let near = clip.expand2(egui::vec2(0.0, clip.height()));
         for (i, tile) in tiles.iter().enumerate() {
             let probe = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), LIST_ROW_H));
             if !ui.is_rect_visible(probe) {
+                if near.intersects(probe) {
+                    self.covers.warm(ctx, &tile.path);
+                }
                 ui.allocate_space(egui::vec2(ui.available_width(), LIST_ROW_H));
                 continue;
             }
             let path = tile.path.as_path();
-            let exists = path.exists();
+            let exists = self.covers.exists(ctx, path);
             let name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
-            let meta = if exists { tile.meta.clone() } else { "File moved or deleted".to_string() };
+            let meta = self.caption(tile, exists);
             let (resp, thumb) = w::row_lead(ui, exists, egui::vec2(31.0, 40.0), &name, Some(&meta), |_| {});
             // A small first page in the row's leading space.
             if ui.is_rect_visible(thumb) {
@@ -498,7 +521,7 @@ impl ViewerApp {
     ) -> (bool, bool) {
         let p = w::pal(ui);
         let path = tile.path.as_path();
-        let exists = path.exists();
+        let exists = self.covers.exists(ctx, path);
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -586,7 +609,7 @@ impl ViewerApp {
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             let (title_rect, _) = ui.allocate_exact_size(egui::vec2(tile_w, 38.0), Sense::hover());
             ui.painter().galley(title_rect.min, galley, p.ink);
-            let meta = if exists { tile.meta.clone() } else { "File moved or deleted".to_string() };
+            let meta = self.caption(tile, exists);
             ui.add(egui::Label::new(RichText::new(meta).small().color(p.muted)).truncate());
         });
         (open, remove)

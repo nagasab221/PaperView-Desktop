@@ -14,6 +14,8 @@ use crate::ui::{theme, widgets as w};
 
 const TOAST_FOR: Duration = Duration::from_millis(4500);
 const ACTIONS_W: f32 = 90.0;
+/// Height of a document tab (the tab strip's row).
+const TAB_H: f32 = 44.0;
 /// Height of PaperView's own title bar, and the width of its window buttons.
 const TITLE_H: f32 = 34.0;
 const WIN_BTN_W: f32 = 44.0;
@@ -202,14 +204,16 @@ impl ViewerApp {
                 // The active tab's underline sits right on the rule below.
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let full = ui.available_width();
-                ui.allocate_ui_with_layout(egui::vec2(full, 44.0), Layout::left_to_right(Align::Center), |ui| {
-                    ui.set_min_height(44.0);
-                    ui.add_space(12.0);
+                ui.allocate_ui_with_layout(egui::vec2(full, TAB_H), Layout::left_to_right(Align::Center), |ui| {
+                    ui.set_min_height(TAB_H);
+                    // Tabs fill exactly this band, wherever egui lays them out.
+                    let band = ui.max_rect().y_range();
+                    ui.add_space(4.0);
                     let tabs_w = (ui.available_width() - ACTIONS_W).max(80.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(tabs_w, 40.0),
+                        egui::vec2(tabs_w, TAB_H),
                         Layout::left_to_right(Align::Center),
-                        |ui| self.tab_strip(ui, &ctx),
+                        |ui| self.tab_strip(ui, &ctx, band),
                     );
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -247,7 +251,7 @@ impl ViewerApp {
     }
 
     /// "Library" first, then one text tab per open document.
-    fn tab_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn tab_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, band: egui::Rangef) {
         let p = w::pal(ui);
         let mut activate: Option<usize> = None;
         let mut close: Option<usize> = None;
@@ -257,15 +261,16 @@ impl ViewerApp {
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if tab_item(ui, &p, "Library", None, self.active_tab.is_none()).0 {
+                    ui.set_height(TAB_H);
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if tab_item(ui, &p, band, "Library", None, self.active_tab.is_none()).0 {
                         home = true;
                     }
                     for (i, tab) in self.tabs.iter().enumerate() {
-                        ui.add_space(10.0);
                         let (clicked, closed) = tab_item(
                             ui,
                             &p,
+                            band,
                             &truncate_title(&tab.title),
                             Some(&tab.path.display().to_string()),
                             self.active_tab == Some(i),
@@ -657,13 +662,21 @@ impl ViewerApp {
 }
 
 /// One tab in the strip: (clicked, close clicked). `path` makes it closable.
+///
+/// Styled after a Plasma taskbar: the active tab glows with the accent —
+/// strongest along its bottom edge, diffusing upward and to the sides — over
+/// a solid accent line; other open documents get a faint wash and a dim line,
+/// like running-but-unfocused tasks. Everything fades as tabs change.
 fn tab_item(
     ui: &mut egui::Ui,
     p: &theme::Palette,
+    band: egui::Rangef,
     title: &str,
     path: Option<&str>,
     active: bool,
 ) -> (bool, bool) {
+    const PAD: f32 = 14.0;
+    const CLOSE: f32 = 20.0;
     let rt = RichText::new(title);
     let rt = if active { rt.family(theme::medium()) } else { rt };
     let galley = egui::WidgetText::from(rt).into_galley(
@@ -672,19 +685,45 @@ fn tab_item(
         f32::INFINITY,
         egui::TextStyle::Body,
     );
-    let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let closable = path.is_some();
+    let width = PAD + galley.size().x + if closable { 6.0 + CLOSE + 6.0 } else { PAD };
+    // Take the width in the layout, but draw and click across the bar's band.
+    let (slot, _) = ui.allocate_exact_size(egui::vec2(width, 20.0), Sense::hover());
+    let rect = egui::Rect::from_x_y_ranges(slot.x_range(), band);
+    let resp = ui.interact(rect, ui.id().with(("tab", title, path)), Sense::click());
+
     let hover = w::hover_t(ui, &resp, !active);
-    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, w::HOVER_FADE);
-    let color = p.muted.lerp_to_gamma(p.ink, hover.max(on));
-    ui.painter().galley(rect.min, galley, color);
-    if on > 0.0 {
-        let bar_bottom = ui.max_rect().bottom();
-        ui.painter().hline(
-            rect.x_range(),
-            bar_bottom - 1.0,
-            Stroke::new(2.0, p.accent.gamma_multiply(on)),
-        );
+    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, 0.2);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-fills")))
+        .with_clip_rect(rect.intersect(ui.clip_rect().expand2(egui::vec2(0.0, 40.0))));
+
+    // Light: the active glow, or a running document's faint wash.
+    let running = if closable { 0.55 } else { 0.0 };
+    let wash = (running * (1.0 - on) + hover * 0.6 * (1.0 - on)).min(1.0);
+    if wash > 0.0 {
+        painter.rect_filled(rect.shrink2(egui::vec2(1.0, 0.0)), 0, p.hover().gamma_multiply(wash));
     }
+    let glow_strength = if p.dark { 0.62 } else { 0.48 };
+    w::glow(&painter, rect.shrink2(egui::vec2(1.0, 0.0)), p.accent, on * glow_strength);
+
+    // The edge line: dim for open documents, accent for the active one. On a
+    // layer above the strip, so its scroll area can't clip the bottom pixels.
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-lines")))
+        .with_clip_rect(rect.expand2(egui::vec2(0.0, 2.0)));
+    let line_y = rect.bottom() - 1.0;
+    if running > 0.0 || hover > 0.0 {
+        let dim = p.muted.gamma_multiply(0.35 * (running + hover * 0.6).min(1.0) * (1.0 - on));
+        painter.hline(rect.x_range(), line_y, Stroke::new(1.0, dim));
+    }
+    if on > 0.0 {
+        painter.hline(rect.x_range(), line_y, Stroke::new(2.0, p.accent.gamma_multiply(on)));
+    }
+
+    // Open-but-unfocused documents keep readable text, as on the taskbar.
+    let text_color = p.muted.lerp_to_gamma(p.ink, hover.max(on).max(running * 1.2));
+    let text_pos = egui::pos2(rect.left() + PAD, rect.center().y - galley.size().y * 0.5);
+    painter.galley(text_pos, galley, text_color);
+
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -693,17 +732,30 @@ fn tab_item(
         None => resp,
     };
     let mut closed = resp.middle_clicked();
-    if path.is_some() {
-        let x = w::button(
-            ui,
-            RichText::new("×").color(p.muted),
-            w::Btn::new(w::Kind::Quiet).min(20.0, 20.0).radius(10),
+    if closable {
+        // The close button sits inside the tab and takes its own clicks.
+        let x_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 6.0 - CLOSE * 0.5, rect.center().y),
+            egui::vec2(CLOSE, CLOSE),
         );
+        let x = ui.interact(x_rect, resp.id.with("close"), Sense::click());
+        let xt = w::hover_t(ui, &x, true);
+        if xt > 0.0 {
+            ui.painter().circle_filled(x_rect.center(), CLOSE * 0.5, p.pressed().gamma_multiply(xt));
+        }
+        let c = x_rect.center();
+        let k = 3.5;
+        let stroke = Stroke::new(1.3, p.muted.lerp_to_gamma(p.ink, xt.max(on * 0.6)));
+        ui.painter().line_segment([c + egui::vec2(-k, -k), c + egui::vec2(k, k)], stroke);
+        ui.painter().line_segment([c + egui::vec2(-k, k), c + egui::vec2(k, -k)], stroke);
+        if x.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         if x.on_hover_text("Close (Ctrl+W)").clicked() {
             closed = true;
         }
     }
-    (resp.clicked(), closed)
+    (resp.clicked() && !closed, closed)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -5,6 +5,16 @@
 use eframe::egui;
 use paperview::app::ViewerApp;
 
+/// The Wayland app id. Debug builds can be told another (`PAPERVIEW_APP_ID`)
+/// so test windows are told apart from the reader's own PaperView.
+fn app_id() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(id) = std::env::var("PAPERVIEW_APP_ID") {
+        return id;
+    }
+    "paperview".to_string()
+}
+
 fn main() -> eframe::Result<()> {
     // `paperview.exe some.pdf` opens the file straight away (the hook the
     // "Open with" association uses). --register / --unregister manage the
@@ -52,7 +62,7 @@ fn main() -> eframe::Result<()> {
             .with_title("PaperView")
             // Matches the desktop entry's StartupWMClass, so Linux shells
             // show the right icon and group the windows.
-            .with_app_id("paperview")
+            .with_app_id(app_id())
             // PaperView draws its own title bar in the app's colours.
             .with_decorations(false)
             .with_inner_size(size)

@@ -20,6 +20,7 @@ pub(super) struct FolderDoc {
     /// Subfolder relative to the added folder, "" for files at its top.
     pub subdir: String,
     pub modified: SystemTime,
+    pub len: u64,
 }
 
 pub(super) struct Listing {
@@ -77,6 +78,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<FolderDoc>, truncat
             out.push(FolderDoc {
                 path,
                 subdir,
+                len: meta.as_ref().map(|m| m.len()).unwrap_or(0),
                 modified: meta.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH),
             });
         }
@@ -139,6 +141,16 @@ impl ViewerApp {
         let Some(rx) = &self.folder_scan else { return };
         match rx.try_recv() {
             Ok(listings) => {
+                // The scan already read every file's size and date: hand them
+                // to the covers so the UI thread never has to ask the disk.
+                for doc in listings.iter().flat_map(|l| &l.docs) {
+                    let secs = doc
+                        .modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    self.covers.seed(&doc.path, doc.len, secs);
+                }
                 // Folders removed while scanning don't come back.
                 self.folder_listings =
                     listings.into_iter().filter(|l| self.folders.contains(&l.root)).collect();
