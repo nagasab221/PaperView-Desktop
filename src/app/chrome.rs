@@ -14,6 +14,8 @@ use crate::ui::{theme, widgets as w};
 
 const TOAST_FOR: Duration = Duration::from_millis(4500);
 const ACTIONS_W: f32 = 132.0;
+/// Height of the bottom bar's row.
+const BAR_H: f32 = 42.0;
 
 impl ViewerApp {
     pub(super) fn toast(&mut self, msg: impl Into<String>) {
@@ -33,8 +35,11 @@ impl ViewerApp {
             .frame(egui::Frame::NONE.fill(p.background))
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_min_height(40.0);
+                // The active tab's underline sits right on the rule below.
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let full = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(full, 44.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.set_min_height(44.0);
                     ui.add_space(12.0);
                     let tabs_w = (ui.available_width() - ACTIONS_W).max(80.0);
                     ui.allocate_ui_with_layout(
@@ -42,6 +47,7 @@ impl ViewerApp {
                         Layout::left_to_right(Align::Center),
                         |ui| self.tab_strip(ui, &ctx),
                     );
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
                         self.overflow_menu(ui, &ctx);
@@ -141,18 +147,13 @@ impl ViewerApp {
                 edit.request_focus();
             }
             let enabled = self.search.active;
-            if ui
-                .add_enabled(enabled, egui::Button::new("⏶"))
-                .on_hover_text("Previous match (Shift+F3)")
-                .clicked()
-            {
+            let arrow = |ui: &mut egui::Ui, glyph: &str| {
+                w::button(ui, RichText::new(glyph).size(15.0), w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0))
+            };
+            if arrow(ui, "⏶").on_hover_text("Previous match (Shift+F3)").clicked() {
                 self.search_step(-1);
             }
-            if ui
-                .add_enabled(enabled, egui::Button::new("⏷"))
-                .on_hover_text("Next match (F3, Enter)")
-                .clicked()
-            {
+            if arrow(ui, "⏷").on_hover_text("Next match (F3, Enter)").clicked() {
                 self.search_step(1);
             }
             if self.search.active {
@@ -274,9 +275,15 @@ impl ViewerApp {
             .frame(egui::Frame::NONE.fill(p.background))
             .show_separator_line(false)
             .show(ui, |ui| {
+                // No gap between the rule and the row, or the row sits low.
+                ui.spacing_mut().item_spacing.y = 0.0;
                 w::hairline(ui);
-                ui.horizontal(|ui| {
-                    ui.set_min_height(38.0);
+                // Fixed height with every control centred on it: a plain
+                // horizontal row only centres against what came before.
+                let full = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(full, BAR_H), Layout::left_to_right(Align::Center), |ui| {
+                    ui.set_min_height(BAR_H);
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     ui.add_space(10.0);
                     self.page_controls(ui);
                     if self.peek_spot().is_some() {
@@ -294,7 +301,7 @@ impl ViewerApp {
     fn page_controls(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         let count = self.page_count();
-        if ui.add(egui::Button::new("‹")).on_hover_text("Previous page (PgUp)").clicked() {
+        if step_button(ui, "‹", self.page_index > 0).on_hover_text("Previous page (PgUp)").clicked() {
             self.go_to_page(self.page_index - 1);
         }
         let field = ui.add(
@@ -313,8 +320,10 @@ impl ViewerApp {
         if !field.has_focus() {
             self.page_field = (self.page_index + 1).to_string();
         }
+        ui.add_space(4.0);
         ui.label(RichText::new(format!("of {count}")).color(p.muted));
-        if ui.add(egui::Button::new("›")).on_hover_text("Next page (PgDn)").clicked() {
+        ui.add_space(2.0);
+        if step_button(ui, "›", self.page_index + 1 < count).on_hover_text("Next page (PgDn)").clicked() {
             self.go_to_page(self.page_index + 1);
         }
     }
@@ -325,13 +334,12 @@ impl ViewerApp {
         let away = self.peek.away();
         let peeking = self.peek.peeking();
         let tint = if away || peeking { p.accent } else { p.ink };
-        let resp = ui
-            .add(
-                egui::Button::new(RichText::new(if away { "↩" } else { "👁" }).size(16.0).color(tint))
-                    .fill(if peeking { p.accent_wash() } else { egui::Color32::TRANSPARENT })
-                    .min_size(egui::Vec2::splat(30.0))
-                    .sense(Sense::click_and_drag()),
-            )
+        let kind = if peeking { w::Kind::Selected } else { w::Kind::Quiet };
+        let resp = w::button(
+            ui,
+            RichText::new(if away { "↩" } else { "👁" }).size(16.0).color(tint),
+            w::Btn::new(kind).min(32.0, 32.0).sense(Sense::click_and_drag()),
+        )
             .on_hover_text(if away {
                 "Back to where you were (Q)"
             } else {
@@ -343,30 +351,32 @@ impl ViewerApp {
 
     fn zoom_controls(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
-        // Right-to-left: the first added sits furthest right.
-        if ui.add(egui::Button::new("+")).on_hover_text("Zoom in (Ctrl+=)").clicked() {
+        // Right-to-left: the first added sits furthest right. Every control is
+        // the same height, the glyph buttons square, so the row lines up.
+        if step_button(ui, "+", true).on_hover_text("Zoom in (Ctrl+=)").clicked() {
             self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
         }
-        if ui
-            .add(
-                egui::Button::new(
-                    RichText::new(format!("{:.0}%", self.effective_zoom * 100.0)).color(p.muted),
-                )
-                .min_size(egui::vec2(52.0, 0.0)),
-            )
+        let pct = RichText::new(format!("{:.0}%", self.effective_zoom * 100.0)).color(p.muted);
+        if w::button(ui, pct, w::Btn::new(w::Kind::Quiet).min(56.0, 32.0))
             .on_hover_text("Actual size (Ctrl+0)")
             .clicked()
         {
             self.change_zoom(Zoom::Custom(1.0), None);
         }
-        if ui.add(egui::Button::new("−")).on_hover_text("Zoom out (Ctrl+-)").clicked() {
+        if step_button(ui, "−", true).on_hover_text("Zoom out (Ctrl+-)").clicked() {
             self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
         }
-        ui.add_space(8.0);
-        if w::tool_button(ui, "Width", self.zoom == Zoom::FitWidth).clicked() {
+        ui.add_space(14.0);
+        let fit = |ui: &mut egui::Ui, label: &str, on: bool| {
+            let kind = if on { w::Kind::Selected } else { w::Kind::Quiet };
+            let rt = RichText::new(label);
+            let rt = if on { rt.family(theme::medium()) } else { rt };
+            w::button(ui, rt, w::Btn::new(kind).min(60.0, 32.0))
+        };
+        if fit(ui, "Width", self.zoom == Zoom::FitWidth).on_hover_text("Fit the page width").clicked() {
             self.change_zoom(Zoom::FitWidth, None);
         }
-        if w::tool_button(ui, "Fit", self.zoom == Zoom::FitPage).clicked() {
+        if fit(ui, "Fit", self.zoom == Zoom::FitPage).on_hover_text("Fit the whole page").clicked() {
             self.change_zoom(Zoom::FitPage, None);
         }
     }
@@ -376,12 +386,17 @@ impl ViewerApp {
     /// Pages and Contents in one panel, as on the phone's drawer.
     pub(super) fn sidebar_panel(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
+        let mut open = self.sidebar != SidebarMode::Hidden;
+        if open {
+            self.sidebar_last = self.sidebar;
+        }
+        let shown = if open { self.sidebar } else { self.sidebar_last };
         egui::Panel::left("sidebar")
             .exact_size(236.0)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(p.background))
             .show_separator_line(false)
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut open, |ui| {
                 // Vertical hairline on the panel's right edge.
                 let r = ui.max_rect();
                 ui.painter().vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, p.hairline));
@@ -391,13 +406,14 @@ impl ViewerApp {
                     ui.vertical(|ui| {
                         let labels: &[&str] =
                             if self.toc.is_empty() { &["Pages"] } else { &["Pages", "Contents"] };
-                        let sel = usize::from(self.sidebar == SidebarMode::Toc);
+                        let sel = usize::from(shown == SidebarMode::Toc);
                         if let Some(i) = w::text_tabs(ui, labels, sel) {
                             self.sidebar = if i == 1 { SidebarMode::Toc } else { SidebarMode::Thumbs };
                         }
                     });
                 });
-                match self.sidebar {
+                // While sliding shut, keep showing what was open.
+                match shown {
                     SidebarMode::Toc => self.toc_body(ui),
                     _ => self.thumbs_body(ui),
                 }
@@ -444,6 +460,10 @@ impl ViewerApp {
 
         if let Some((msg, at)) = &self.toast {
             let left = TOAST_FOR.saturating_sub(at.elapsed());
+            // Fade in over 150 ms, out over the last 350 ms.
+            let alpha = (at.elapsed().as_secs_f32() / 0.15)
+                .min(left.as_secs_f32() / 0.35)
+                .clamp(0.0, 1.0);
             if left.is_zero() {
                 self.toast = None;
             } else {
@@ -453,6 +473,7 @@ impl ViewerApp {
                     .order(egui::Order::Tooltip)
                     .interactable(false)
                     .show(ctx, |ui| {
+                        ui.multiply_opacity(alpha);
                         egui::Frame::NONE
                             .fill(p.ink)
                             .corner_radius(6)
@@ -462,7 +483,11 @@ impl ViewerApp {
                                 ui.add(egui::Label::new(RichText::new(msg).color(p.background)).wrap());
                             });
                     });
-                ctx.request_repaint_after(left);
+                if alpha < 1.0 {
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(left.saturating_sub(Duration::from_millis(350)));
+                }
             }
         }
     }
@@ -476,32 +501,53 @@ fn tab_item(
     path: Option<&str>,
     active: bool,
 ) -> (bool, bool) {
-    let color = if active { p.ink } else { p.muted };
-    let text = RichText::new(title).color(color);
-    let text = if active { text.family(theme::medium()) } else { text };
-    let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
-    let resp = match path {
-        Some(p) => resp.on_hover_text(p),
-        None => resp,
-    };
-    if active {
-        let r = resp.rect;
+    let rt = RichText::new(title);
+    let rt = if active { rt.family(theme::medium()) } else { rt };
+    let galley = egui::WidgetText::from(rt).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
+    let hover = w::hover_t(ui, &resp, !active);
+    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, w::HOVER_FADE);
+    let color = p.muted.lerp_to_gamma(p.ink, hover.max(on));
+    ui.painter().galley(rect.min, galley, color);
+    if on > 0.0 {
         let bar_bottom = ui.max_rect().bottom();
-        ui.painter().hline(r.x_range(), bar_bottom - 1.0, Stroke::new(2.0, p.accent));
+        ui.painter().hline(
+            rect.x_range(),
+            bar_bottom - 1.0,
+            Stroke::new(2.0, p.accent.gamma_multiply(on)),
+        );
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    let resp = match path {
+        Some(full) => resp.on_hover_text(full),
+        None => resp,
+    };
     let mut closed = resp.middle_clicked();
     if path.is_some() {
-        let x = ui.add(
-            egui::Button::new(RichText::new("×").color(p.muted))
-                .frame(false)
-                .min_size(egui::vec2(16.0, 16.0)),
+        let x = w::button(
+            ui,
+            RichText::new("×").color(p.muted),
+            w::Btn::new(w::Kind::Quiet).min(20.0, 20.0).radius(10),
         );
         if x.on_hover_text("Close (Ctrl+W)").clicked() {
             closed = true;
         }
     }
     (resp.clicked(), closed)
+}
+
+/// A square glyph button for steppers (page, zoom).
+fn step_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    w::button(
+        ui,
+        RichText::new(glyph).size(17.0),
+        w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0),
+    )
 }

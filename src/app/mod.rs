@@ -17,6 +17,7 @@ use crate::ui::widgets as w;
 #[cfg(debug_assertions)]
 mod automate;
 mod chrome;
+mod folders;
 mod library;
 mod peek;
 mod settings;
@@ -49,7 +50,7 @@ enum ViewMode {
 }
 
 /// What the home view shows when no document is active.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum HomeScreen {
     Library,
     Settings,
@@ -67,9 +68,12 @@ enum ScrollTarget {
     Spot { page: i32, y_frac: f32, x_frac: f32 },
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum LandingTab {
     Recent,
+    /// Folders the reader added.
+    Folders,
+    /// The Backblaze bucket.
     Saved,
 }
 
@@ -450,6 +454,12 @@ pub struct ViewerApp {
     /// Q went down together with Shift (that was Shift+Q): ignore it until released.
     q_suppressed: bool,
     search_open: bool,
+    /// Folders added to the Library, and what was last read from them.
+    folders: Vec<PathBuf>,
+    folder_listings: Vec<folders::Listing>,
+    folders_scanned: Option<Instant>,
+    /// The sidebar's last open mode, shown while it slides shut.
+    sidebar_last: SidebarMode,
     /// A transient message, bottom centre.
     toast: Option<(String, Instant)>,
     #[cfg(debug_assertions)]
@@ -551,6 +561,10 @@ impl ViewerApp {
             peek: peek::Peek::default(),
             q_suppressed: false,
             search_open: false,
+            folders: Vec::new(),
+            folder_listings: Vec::new(),
+            folders_scanned: None,
+            sidebar_last: SidebarMode::Thumbs,
             toast: None,
             #[cfg(debug_assertions)]
             announced_first_frame: false,
@@ -588,6 +602,9 @@ impl ViewerApp {
             app.cloud_enabled = storage.get_string("cloud_enabled").as_deref() != Some("0");
             if let Some(raw) = storage.get_string("peek_spots") {
                 app.peek.spots = peek::decode_spots(&raw);
+            }
+            if let Some(raw) = storage.get_string("folders") {
+                app.folders = folders::decode(&raw);
             }
             app.peek.tips_shown = storage
                 .get_string("peek_tips")
@@ -1576,6 +1593,12 @@ impl ViewerApp {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        // A dropped folder joins the Library; files go on as before.
+        let (dirs, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| p.is_dir());
+        for dir in dirs {
+            self.add_folder(dir);
+        }
         if !dropped.is_empty() {
             let upload_mode = self.doc.is_none()
                 && self.home == HomeScreen::Library
@@ -2549,9 +2572,8 @@ impl eframe::App for ViewerApp {
         self.top_bar(ui);
         if self.doc.is_some() {
             self.bottom_bar(ui);
-            if self.sidebar != SidebarMode::Hidden {
-                self.sidebar_panel(ui);
-            }
+            // Always called: it slides itself open and shut.
+            self.sidebar_panel(ui);
         }
         self.central(ui);
         self.overlays(&ctx);
@@ -2581,6 +2603,7 @@ impl eframe::App for ViewerApp {
         storage.set_string("cloud_enabled", if self.cloud_enabled { "1" } else { "0" }.to_string());
         storage.set_string("peek_spots", peek::encode_spots(&self.peek.spots));
         storage.set_string("peek_tips", self.peek.tips_shown.to_string());
+        storage.set_string("folders", folders::encode(&self.folders));
         storage.set_string("zoom", zoom_to_str(self.zoom));
         storage.set_string("recents", encode_recents(&self.recents));
         storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());

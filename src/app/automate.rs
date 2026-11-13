@@ -6,6 +6,7 @@
 //! * `wait MS` — let the app run
 //! * `key [shift+|ctrl+]NAME down|up|tap` — e.g. `key Q down`, `key shift+Q tap`
 //! * `move X Y` · `click X Y` · `rclick X Y` · `press X Y` · `release X Y`
+//! * `drop PATH` — drop a file or folder onto the window
 //! * `type TEXT` — text input into the focused field
 //! * `scroll DY` — mouse wheel, logical points (negative scrolls down)
 //! * `shot NAME` — save `NAME.ppm` (waits for the frame to be captured)
@@ -164,7 +165,18 @@ impl ViewerApp {
                         "release" => push(false),
                         _ => {}
                     }
-                    s.wait_until = Some(Instant::now() + Duration::from_millis(120));
+                    if op != "move" {
+                        s.wait_until = Some(Instant::now() + Duration::from_millis(120));
+                    }
+                    break;
+                }
+                Some("drop") => {
+                    let path = step.split_once(' ').map(|(_, t)| t).unwrap_or("");
+                    raw.dropped_files.push(egui::DroppedFile {
+                        path: Some(PathBuf::from(path)),
+                        ..Default::default()
+                    });
+                    s.wait_until = Some(Instant::now() + Duration::from_millis(100));
                     break;
                 }
                 Some("type") => {
@@ -201,6 +213,13 @@ impl ViewerApp {
                         self.peek_spot().map(|p| (p.page + 1, (p.y_frac * 1000.0).round() / 1000.0)),
                         self.recents.len(),
                         self.toast.as_ref().map(|t| t.0.clone()),
+                    );
+                }
+                Some("dt") => {
+                    eprintln!(
+                        "automate: frame dt={:.3}s stable_dt={:.3}s",
+                        ctx.input(|i| i.unstable_dt),
+                        ctx.input(|i| i.stable_dt)
                     );
                 }
                 Some("layer") => {

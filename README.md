@@ -27,7 +27,9 @@ Made for working through questions while the answers are somewhere else in the d
 There's an eye button next to the page number that does the same with the mouse: hold it to peek, click it to jump. Each document remembers its own peek spot, and pressing **Shift+Q** again moves it.
 
 ### 📚 Your library
-All your recent PDFs on a shelf, showing their first page and the page you're on. Right-click a cover to show it in its folder or remove it.
+- All your recent PDFs on a shelf, showing their first page and the page you're on.
+- **Add a folder** (or drop one onto the window) and a **Folders** tab shows every PDF in it, subfolders included. Files you add or delete in the folder show up automatically.
+- Right-click a cover to show it in its folder, or to remove it from Recents.
 
 ### ☁ Your own cloud (optional)
 Keep documents in your own **Backblaze B2** bucket. It's the same bucket as the phone app, so a PDF saved on one shows up on the other. A **Cloud** tab appears in the Library once it's set up, and nothing uploads unless you ask.

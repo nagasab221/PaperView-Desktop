@@ -1,9 +1,10 @@
-//! First-page covers for the Library shelf, rendered off the UI thread.
+//! First-page covers for the Library shelves, rendered off the UI thread.
 //!
-//! A worker opens each requested document, renders page one at cover width
-//! and hands the pixels back; the UI turns them into textures. Keyed by path
-//! *and* file size + modification time, so a document changed on disk gets a
-//! fresh cover rather than a stale one.
+//! One worker thread takes requests in order, opens each document, renders
+//! page one at cover width and hands the pixels back; the UI turns them into
+//! textures. Callers only ask for covers that are on screen, so a folder of a
+//! thousand PDFs costs what the visible tiles cost. Keyed by path *and* file
+//! size + modification time, so a document changed on disk gets a fresh cover.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,44 +50,67 @@ pub struct Covers {
     engine: Option<PdfEngine>,
     map: HashMap<Key, Cover>,
     pending: HashSet<Key>,
-    tx: Sender<Done>,
-    rx: Receiver<Done>,
+    /// Requests to the worker; started on first use.
+    work: Option<Sender<Key>>,
+    done_tx: Sender<Done>,
+    done_rx: Receiver<Done>,
 }
 
 impl Covers {
     pub fn new(engine: Option<PdfEngine>) -> Self {
-        let (tx, rx) = channel();
+        let (done_tx, done_rx) = channel();
         Self {
             engine,
             map: HashMap::new(),
             pending: HashSet::new(),
-            tx,
-            rx,
+            work: None,
+            done_tx,
+            done_rx,
         }
     }
 
-    /// The cover for `path`, if rendered; asks for it otherwise.
+    fn worker(&mut self, ctx: &egui::Context) -> Option<&Sender<Key>> {
+        if self.work.is_none() {
+            let engine = self.engine?;
+            let (tx, rx) = channel::<Key>();
+            let done = self.done_tx.clone();
+            let ctx = ctx.clone();
+            std::thread::Builder::new()
+                .name("covers".into())
+                .spawn(move || {
+                    for key in rx {
+                        let out = match engine
+                            .open(&key.path, None)
+                            .ok()
+                            .and_then(|doc| doc.render_page(0, COVER_PX, 0).ok())
+                        {
+                            Some(r) => Done::Ok(key, r.width, r.height, r.rgba),
+                            None => Done::Failed(key),
+                        };
+                        if done.send(out).is_err() {
+                            break;
+                        }
+                        ctx.request_repaint();
+                    }
+                })
+                .ok()?;
+            self.work = Some(tx);
+        }
+        self.work.as_ref()
+    }
+
+    /// The cover for `path`, if rendered; queues it otherwise. Only call this
+    /// for tiles that are actually visible.
     pub fn get(&mut self, ctx: &egui::Context, path: &Path) -> Option<&Cover> {
         let key = Key::of(path)?;
         if self.map.contains_key(&key) {
             return self.map.get(&key);
         }
-        if self.pending.insert(key.clone()) {
-            if let Some(engine) = self.engine {
-                let tx = self.tx.clone();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let done = match engine
-                        .open(&key.path, None)
-                        .ok()
-                        .and_then(|doc| doc.render_page(0, COVER_PX, 0).ok())
-                    {
-                        Some(r) => Done::Ok(key, r.width, r.height, r.rgba),
-                        None => Done::Failed(key),
-                    };
-                    let _ = tx.send(done);
-                    ctx.request_repaint();
-                });
+        if !self.pending.contains(&key) {
+            if let Some(tx) = self.worker(ctx) {
+                if tx.send(key.clone()).is_ok() {
+                    self.pending.insert(key);
+                }
             }
         }
         None
@@ -94,7 +118,7 @@ impl Covers {
 
     /// Turns finished renders into textures. Call once per frame.
     pub fn pump(&mut self, ctx: &egui::Context) {
-        while let Ok(done) = self.rx.try_recv() {
+        while let Ok(done) = self.done_rx.try_recv() {
             match done {
                 Done::Ok(key, w, h, rgba) => {
                     let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);

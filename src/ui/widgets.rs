@@ -2,10 +2,23 @@
 //! counterpart of the Android app's `ui/components/Paper.kt`. Screens should
 //! compose these rather than reach for egui's defaults; that is what keeps
 //! the app looking like one thing.
+//!
+//! Interactive pieces animate: a hover fades its wash in and out, a press
+//! darkens it, tab underlines slide. Each animation is a few frames of
+//! `animate_*`, which only asks for repaints while something is moving — an
+//! idle window still costs nothing.
 
-use eframe::egui::{self, Align, Color32, Layout, Response, RichText, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, Align, Color32, CursorIcon, Layout, Response, RichText, Sense, Stroke, StrokeKind, Ui,
+    Vec2, WidgetText,
+};
 
 use super::theme::{self, Palette};
+
+/// Hover fade, seconds.
+pub const HOVER_FADE: f32 = 0.14;
+/// Press darkening, seconds.
+const PRESS_FADE: f32 = 0.06;
 
 /// The palette currently in force, stashed in egui's memory by the app.
 pub fn pal(ui: &Ui) -> Palette {
@@ -17,6 +30,170 @@ pub fn pal(ui: &Ui) -> Palette {
 pub fn set_pal(ctx: &egui::Context, p: Palette) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("paper-palette"), p));
 }
+
+/// How far a widget is into its hover (0..1), eased.
+pub fn hover_t(ui: &Ui, resp: &Response, enabled: bool) -> f32 {
+    ui.ctx().animate_bool_with_time(
+        resp.id.with("hover"),
+        enabled && (resp.hovered() || resp.has_focus()),
+        HOVER_FADE,
+    )
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// No frame until hovered: toolbars, text actions.
+    Quiet,
+    /// Accent text, no frame: inline actions inside content.
+    Inline,
+    /// Quiet, but marked as the current choice.
+    Selected,
+    /// Solid accent: the one main action.
+    Primary,
+    /// Hairline outline: secondary actions.
+    Outlined,
+}
+
+/// Everything a button can vary in, with sensible defaults.
+#[derive(Clone, Copy)]
+pub struct Btn {
+    pub kind: Kind,
+    pub enabled: bool,
+    pub min: Vec2,
+    pub radius: u8,
+    pub sense: Sense,
+}
+
+impl Btn {
+    pub fn new(kind: Kind) -> Self {
+        Btn {
+            kind,
+            enabled: true,
+            min: Vec2::new(0.0, 30.0),
+            radius: 4,
+            sense: Sense::click(),
+        }
+    }
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
+    }
+    pub fn min(mut self, w: f32, h: f32) -> Self {
+        self.min = Vec2::new(w, h);
+        self
+    }
+    pub fn radius(mut self, r: u8) -> Self {
+        self.radius = r;
+        self
+    }
+    pub fn sense(mut self, s: Sense) -> Self {
+        self.sense = s;
+        self
+    }
+}
+
+/// The one button every control is drawn with.
+pub fn button(ui: &mut Ui, text: impl Into<WidgetText>, b: Btn) -> Response {
+    let p = pal(ui);
+    let galley = text.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let pad = if b.kind == Kind::Inline { Vec2::new(6.0, 4.0) } else { Vec2::new(11.0, 5.0) };
+    let size = (galley.size() + pad * 2.0).max(b.min);
+    let sense = if b.enabled { b.sense } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+
+    if ui.is_rect_visible(rect) {
+        let hover = hover_t(ui, &resp, b.enabled);
+        let press = ui.ctx().animate_bool_with_time(
+            resp.id.with("press"),
+            b.enabled && resp.is_pointer_button_down_on(),
+            PRESS_FADE,
+        );
+        let (fill, stroke, text) = match (b.kind, b.enabled) {
+            (_, false) => (Color32::TRANSPARENT, Stroke::NONE, p.muted),
+            (Kind::Primary, true) => {
+                let lift = Palette::mix(p.accent, p.ink, 0.12);
+                (p.accent.lerp_to_gamma(lift, hover * 0.6 + press * 0.4), Stroke::NONE, p.on_accent)
+            }
+            (Kind::Outlined, true) => (
+                p.hover().gamma_multiply(hover).lerp_to_gamma(p.pressed(), press),
+                Stroke::new(1.0, p.hairline.lerp_to_gamma(p.muted, hover * 0.6)),
+                p.ink,
+            ),
+            (Kind::Selected, true) => (
+                p.accent_wash().lerp_to_gamma(p.pressed(), press * 0.5),
+                Stroke::NONE,
+                p.accent,
+            ),
+            (Kind::Inline, true) => (
+                p.hover().gamma_multiply(hover * 0.8).lerp_to_gamma(p.pressed(), press),
+                Stroke::NONE,
+                p.accent,
+            ),
+            (Kind::Quiet, true) => (
+                p.hover().gamma_multiply(hover).lerp_to_gamma(p.pressed(), press),
+                Stroke::NONE,
+                p.ink,
+            ),
+        };
+        let painter = ui.painter();
+        painter.rect(rect, b.radius, fill, stroke, StrokeKind::Inside);
+        let pos = rect.center() - galley.size() * 0.5;
+        painter.galley(pos, galley, text);
+    }
+    if b.enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// A frameless accent-coloured text action.
+pub fn inline_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    button(
+        ui,
+        RichText::new(text).family(theme::medium()),
+        Btn::new(Kind::Inline).enabled(enabled).min(0.0, 26.0),
+    )
+}
+
+/// A quiet text button for toolbars; `on` marks the current choice.
+pub fn tool_button(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let rt = RichText::new(text);
+    let rt = if on { rt.family(theme::medium()) } else { rt };
+    button(ui, rt, Btn::new(if on { Kind::Selected } else { Kind::Quiet }).min(0.0, 30.0))
+}
+
+/// The primary action: solid accent.
+pub fn primary_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    button(
+        ui,
+        RichText::new(text).family(theme::medium()),
+        Btn::new(Kind::Primary).enabled(enabled).min(0.0, 32.0),
+    )
+}
+
+/// A secondary action: hairline outline.
+pub fn outlined_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    button(ui, text, Btn::new(Kind::Outlined).enabled(enabled).min(0.0, 32.0))
+}
+
+/// A square glyph button with a tooltip; `on` tints it with the accent.
+pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, on: bool) -> Response {
+    button(
+        ui,
+        RichText::new(glyph).size(16.0),
+        Btn::new(if on { Kind::Selected } else { Kind::Quiet }).min(32.0, 32.0),
+    )
+    .on_hover_text(tip)
+}
+
+// ── Structure ────────────────────────────────────────────────────────────────
 
 /// The single hairline used wherever a boundary is needed.
 pub fn hairline(ui: &mut Ui) {
@@ -58,59 +235,24 @@ pub fn masthead(ui: &mut Ui, title: &str, subtitle: Option<&str>, actions: impl 
     });
 }
 
-/// A frameless accent-coloured text button.
-pub fn inline_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
-    let p = pal(ui);
-    let color = if enabled { p.accent } else { p.muted };
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).family(theme::medium()).color(color)).frame(false),
-    )
-}
-
-/// A quiet text button for toolbars; `on` marks the current choice.
-pub fn tool_button(ui: &mut Ui, text: &str, on: bool) -> Response {
-    let p = pal(ui);
-    let rt = RichText::new(text).color(if on { p.accent } else { p.ink });
-    let rt = if on { rt.family(theme::medium()) } else { rt };
-    ui.add(egui::Button::new(rt).fill(if on { p.accent_wash() } else { Color32::TRANSPARENT }))
-}
-
-/// The primary action: solid accent.
-pub fn primary_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
-    let p = pal(ui);
-    let (fill, fg) = if enabled { (p.accent, p.on_accent) } else { (p.hover(), p.muted) };
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).family(theme::medium()).color(fg))
-            .fill(fill)
-            .min_size(egui::vec2(0.0, 32.0)),
-    )
-}
-
-/// A secondary action: hairline outline.
-pub fn outlined_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
-    let p = pal(ui);
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).color(if enabled { p.ink } else { p.muted }))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, p.hairline))
-            .min_size(egui::vec2(0.0, 32.0)),
-    )
-}
-
-/// A single-line text field on a hairline frame.
+/// A single-line text field on a hairline frame; the frame warms on focus.
 pub fn field(ui: &mut Ui, value: &mut String, hint: &str, password: bool, width: f32) -> Response {
     let p = pal(ui);
+    let id = ui.next_auto_id();
+    let focus = ui.ctx().animate_bool_with_time(
+        id.with("focus"),
+        ui.memory(|m| m.focused()).is_some_and(|f| f == id.with("edit")),
+        HOVER_FADE,
+    );
     egui::Frame::NONE
         .fill(p.surface)
-        .stroke(Stroke::new(1.0, p.hairline))
+        .stroke(Stroke::new(1.0, p.hairline.lerp_to_gamma(p.accent, focus)))
         .corner_radius(4)
         .inner_margin(egui::Margin::symmetric(10, 7))
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(value)
+                    .id(id.with("edit"))
                     .frame(egui::Frame::NONE)
                     .password(password)
                     .hint_text(RichText::new(hint).color(p.muted))
@@ -127,7 +269,7 @@ pub fn field_label(ui: &mut Ui, text: &str) {
 }
 
 /// A row: optional glyph, title, description, trailing content. A
-/// `clickable` row highlights on hover and reports clicks.
+/// `clickable` row fades a wash in on hover and reports clicks.
 pub fn row(
     ui: &mut Ui,
     clickable: bool,
@@ -176,100 +318,100 @@ pub fn row(
     let rect = inner.response.rect;
     let sense = if clickable { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(rect, ui.id().with(("row", title)), sense);
-    if clickable && resp.hovered() {
-        ui.painter()
-            .set(wash, egui::epaint::RectShape::filled(rect, 4, p.hover()));
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if clickable {
+        let t = hover_t(ui, &resp, true);
+        if t > 0.0 {
+            ui.painter()
+                .set(wash, egui::epaint::RectShape::filled(rect, 4, p.hover().gamma_multiply(t)));
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
     }
     resp
 }
 
-/// Text tabs over a hairline, the selected one in accent with an underline.
+/// Text tabs over a hairline. The selected one is in the accent, and its
+/// underline slides across when the selection changes.
 pub fn text_tabs(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize> {
     let p = pal(ui);
     let mut clicked = None;
-    ui.horizontal(|ui| {
+    let mut spans: Vec<egui::Rangef> = Vec::with_capacity(labels.len());
+    let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 22.0;
         for (i, label) in labels.iter().enumerate() {
             let on = i == selected;
-            let text = RichText::new(*label)
-                .family(theme::medium())
-                .size(14.5)
-                .color(if on { p.accent } else { p.muted });
-            let resp = ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false));
-            if on {
-                let r = resp.rect;
-                ui.painter().hline(
-                    r.x_range(),
-                    r.bottom() + 7.0,
-                    Stroke::new(2.0, p.accent),
-                );
-            }
+            let galley = WidgetText::from(RichText::new(*label).family(theme::medium()).size(14.5))
+                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+            let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
+            let t = hover_t(ui, &resp, !on);
+            let on_t = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, HOVER_FADE);
+            let color = p.muted.lerp_to_gamma(p.ink, t * 0.8).lerp_to_gamma(p.accent, on_t);
+            ui.painter().galley(rect.min, galley, color);
             if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
             if resp.clicked() {
                 clicked = Some(i);
             }
+            spans.push(rect.x_range());
         }
     });
+    // One underline, gliding between tabs.
+    if let Some(target) = spans.get(selected) {
+        let id = row.response.id.with("underline");
+        let left = ui.ctx().animate_value_with_time(id.with("l"), target.min, 0.18);
+        let right = ui.ctx().animate_value_with_time(id.with("r"), target.max, 0.18);
+        let y = row.response.rect.bottom() + 7.0;
+        ui.painter().hline(left..=right, y, Stroke::new(2.0, p.accent));
+    }
     ui.add_space(6.0);
     hairline(ui);
     clicked
 }
 
-/// A pill switch in the accent colour.
+/// A pill switch in the accent colour; the knob slides.
 pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
     let p = pal(ui);
     let size = egui::vec2(38.0, 22.0);
-    let (rect, mut resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let (rect, mut resp) =
+        ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     if enabled && resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
-    let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.16);
     let track = if !enabled {
         p.hover()
-    } else if *on {
-        p.accent
     } else {
-        p.background
+        p.background.lerp_to_gamma(p.accent, t)
     };
     let painter = ui.painter();
     painter.rect(
         rect,
         11,
         track,
-        Stroke::new(1.0, if *on && enabled { p.accent } else { p.hairline }),
-        egui::StrokeKind::Inside,
+        Stroke::new(1.0, if enabled { p.hairline.lerp_to_gamma(p.accent, t) } else { p.hairline }),
+        StrokeKind::Inside,
     );
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    let knob = if *on && enabled { p.on_accent } else { p.muted };
+    let knob = if enabled { p.muted.lerp_to_gamma(p.on_accent, t) } else { p.muted };
     painter.circle_filled(egui::pos2(x, rect.center().y), 7.0, knob);
     if enabled && resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
     resp
 }
 
-/// A choice among a few options, as text chips; returns the new index.
+/// A choice among a few options, as rounded chips; returns the new index.
 pub fn choice_chips(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize> {
-    let p = pal(ui);
     let mut out = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         for (i, label) in labels.iter().enumerate() {
             let on = i == selected;
-            let resp = ui.add(
-                egui::Button::new(
-                    RichText::new(*label).color(if on { p.on_accent } else { p.ink }),
-                )
-                .fill(if on { p.accent } else { Color32::TRANSPARENT })
-                .stroke(Stroke::new(1.0, if on { p.accent } else { p.hairline }))
-                .corner_radius(14)
-                .min_size(egui::vec2(64.0, 28.0)),
-            );
-            if resp.clicked() && !on {
+            let kind = if on { Kind::Primary } else { Kind::Outlined };
+            if button(ui, *label, Btn::new(kind).radius(14).min(64.0, 28.0)).clicked() && !on {
                 out = Some(i);
             }
         }
@@ -295,13 +437,25 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str, action: Option<(&str, &
     ui.add_space(24.0);
 }
 
-/// A glyph button with a tooltip; `on` tints it with the accent.
-pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, on: bool) -> Response {
-    let p = pal(ui);
-    ui.add(
-        egui::Button::new(RichText::new(glyph).size(16.0).color(if on { p.accent } else { p.ink }))
-            .fill(if on { p.accent_wash() } else { Color32::TRANSPARENT })
-            .min_size(Vec2::splat(30.0)),
-    )
-    .on_hover_text(tip)
+/// Fades a freshly shown view in: call at the top of a view with a key that
+/// changes whenever the view does.
+pub fn fade_in(ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug) {
+    let id = egui::Id::new(("fade-in", key));
+    let now = ui.input(|i| i.time);
+    let started = ui.ctx().data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
+    // Forget other views' start times so coming back fades again.
+    let current = egui::Id::new("fade-in-current");
+    let previous = ui.ctx().data(|d| d.get_temp::<egui::Id>(current));
+    if previous != Some(id) {
+        if let Some(prev) = previous {
+            ui.ctx().data_mut(|d| d.remove::<f64>(prev));
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(current, id));
+    }
+    let elapsed = (now - started) as f32;
+    let t = (elapsed / 0.18).clamp(0.0, 1.0);
+    if t < 1.0 {
+        ui.multiply_opacity(t * (2.0 - t)); // ease-out
+        ui.ctx().request_repaint();
+    }
 }
