@@ -275,9 +275,11 @@ the reading position. Press and release inside one frame still counts as a tap.
 
     PAPERVIEW_AUTOMATE="wait 1500; key Q down; wait 600; dump; shot peek; key Q up; quit" \
     PAPERVIEW_SHOTS=/tmp/shots PAPERVIEW_SIZE=1100x1000 XDG_DATA_HOME=/tmp/pv-test \
-    kwin_wayland --virtual --width 1280 --height 1100 \
+    dbus-run-session kwin_wayland --virtual --width 1280 --height 1100 \
       --exit-with-session="target/debug/paperview some.pdf"
 
+Always wrap it in `dbus-run-session`: a nested KWin on your real session bus marks your
+desktop KWin's global shortcuts (Alt+Tab, Alt+F4, layout switching…) as gone when it exits.
 Use a throwaway `XDG_DATA_HOME`: eframe restores window size and scroll positions from
 its saved state, which makes click coordinates drift between runs.
 
