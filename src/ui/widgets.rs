@@ -27,6 +27,28 @@ pub fn pal(ui: &Ui) -> Palette {
         .unwrap_or_else(|| theme::palette(theme::Skin::Paper, ui.visuals().dark_mode))
 }
 
+/// The palette, where only the context is at hand (overlays).
+pub fn pal_ctx(ctx: &egui::Context) -> Palette {
+    ctx.data(|d| d.get_temp::<Palette>(egui::Id::new("paper-palette")))
+        .unwrap_or_else(|| theme::palette(theme::Skin::Paper, false))
+}
+
+/// Selects all of a text field's contents when it gains focus, so a typed
+/// number replaces the old one instead of joining it.
+pub fn select_all_on_focus(ui: &Ui, resp: &Response, text: &str) {
+    if !resp.gained_focus() {
+        return;
+    }
+    if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), resp.id) {
+        let all = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(text.chars().count()),
+        );
+        state.cursor.set_char_range(Some(all));
+        state.store(ui.ctx(), resp.id);
+    }
+}
+
 pub fn set_pal(ctx: &egui::Context, p: Palette) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("paper-palette"), p));
 }

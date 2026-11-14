@@ -24,6 +24,7 @@ mod library;
 mod peek;
 mod reader;
 mod settings;
+mod typography;
 use crate::pdf::{Document, LinkTarget, OpenError, PdfEngine, TocEntry};
 use crate::print::{self, PrintEvent};
 use crate::search::SearchState;
@@ -413,6 +414,10 @@ pub struct ViewerApp {
     scroll_to: Option<ScrollTarget>,
     /// Scroll offset of the page view last frame (for zoom anchoring).
     last_offset: egui::Vec2,
+    /// The view's size last frame and the spot at its top edge (page, how far
+    /// down it, how far across the content): a resize — full screen, a
+    /// maximise, a dragged edge — scrolls back to the same spot.
+    resize_anchor: Option<(egui::Vec2, ScrollTarget)>,
     /// Screen rect of the page view last frame (for pointer anchoring).
     central_rect: egui::Rect,
     /// Effective zoom before a pending zoom change, for anchor math.
@@ -497,7 +502,15 @@ pub struct ViewerApp {
     /// Books on the Library's Books tab.
     books: Vec<books::BookEntry>,
     book_spread: bool,
-    book_font: f32,
+    /// How books are typeset: face, size, spacing, margins, paragraphs.
+    reading: reader::ReadingStyle,
+    /// The book bar's page box while it's being edited.
+    book_page_field: String,
+    /// Full screen with nothing but the pages (F11).
+    immersive: bool,
+    /// When the pointer last moved: the full-screen controls show for a
+    /// moment after.
+    immersive_stir: Option<Instant>,
     /// The first-launch "make PaperView the default?" question was answered.
     default_asked: bool,
     /// Whether PaperView is the default PDF app, checked when Settings opens.
@@ -564,6 +577,7 @@ impl ViewerApp {
             status: None,
             scroll_to: None,
             last_offset: egui::Vec2::ZERO,
+            resize_anchor: None,
             central_rect: egui::Rect::NOTHING,
             zoom_prev_effective: None,
             zoom_anchor: None,
@@ -613,7 +627,10 @@ impl ViewerApp {
             book: None,
             books: Vec::new(),
             book_spread: true,
-            book_font: 18.0,
+            reading: reader::ReadingStyle::default(),
+            book_page_field: String::new(),
+            immersive: false,
+            immersive_stir: None,
             default_asked: false,
             default_status: None,
             ui_scale: 1.0,
@@ -672,11 +689,18 @@ impl ViewerApp {
             }
             app.book_spread = storage.get_string("book_spread").as_deref() != Some("0");
             app.default_asked = storage.get_string("default_asked").as_deref() == Some("1");
-            app.book_font = storage
-                .get_string("book_font")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(18.0f32)
-                .clamp(reader::FONT_MIN, reader::FONT_MAX);
+            app.reading = match storage.get_string("reading") {
+                Some(raw) => reader::ReadingStyle::decode(&raw),
+                // Before typefaces could be chosen only the size was kept.
+                None => reader::ReadingStyle {
+                    size: storage
+                        .get_string("book_font")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(18.0f32)
+                        .clamp(reader::FONT_MIN, reader::FONT_MAX),
+                    ..Default::default()
+                },
+            };
             if let Some(raw) = storage.get_string("folders") {
                 app.folders = folders::decode(&raw);
             }
@@ -1732,6 +1756,7 @@ impl ViewerApp {
         let typing = ctx.egui_wants_keyboard_input();
         let search_active = self.search.active || self.search_open;
         let has_selection = self.selection.is_some();
+        let immersive = self.immersive;
 
         struct Keys {
             open: bool,
@@ -1762,6 +1787,9 @@ impl ViewerApp {
             reopen_closed: bool,
             wheel_y: f32,
             settings: bool,
+            fullscreen: bool,
+            leave_fullscreen: bool,
+            goto_page: bool,
             peek_set: bool,
             peek_down: bool,
             peek_quick: bool,
@@ -1828,6 +1856,11 @@ impl ViewerApp {
                 i.smooth_scroll_delta.y
             },
             settings: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma),
+            fullscreen: i.consume_key(egui::Modifiers::NONE, egui::Key::F11),
+            leave_fullscreen: immersive
+                && !typing
+                && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            goto_page: i.consume_key(egui::Modifiers::COMMAND, egui::Key::G),
             peek_set: !typing && i.consume_key(egui::Modifiers::SHIFT, egui::Key::Q),
             peek_down: !typing
                 && i.key_down(egui::Key::Q)
@@ -1863,7 +1896,23 @@ impl ViewerApp {
             }
         }
         if k.settings {
+            self.set_immersive(ctx, false);
             self.open_settings(ctx);
+        }
+        let reading = self.doc.is_some() || self.book.is_some();
+        if k.fullscreen && reading {
+            let on = !self.immersive;
+            self.set_immersive(ctx, on);
+        }
+        if k.leave_fullscreen {
+            self.set_immersive(ctx, false);
+        }
+        // Ctrl+G: straight into the page box, emptied, ready for a number.
+        if k.goto_page && reading {
+            self.immersive_stir = Some(Instant::now());
+            self.book_page_field.clear();
+            self.page_field.clear();
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new("page-field")));
         }
         if k.find && self.doc.is_some() {
             self.search_open = true;
@@ -1893,10 +1942,10 @@ impl ViewerApp {
                 }
             }
             if k.zoom_in {
-                self.set_book_font(self.book_font + 1.0);
+                self.bump_book_size(1.0);
             }
             if k.zoom_out {
-                self.set_book_font(self.book_font - 1.0);
+                self.bump_book_size(-1.0);
             }
             self.save_book_progress();
         }
@@ -2203,7 +2252,15 @@ impl ViewerApp {
             }
             if let Some(view) = &mut self.book {
                 let p = w::pal(ui);
-                if view.show(ui, &p) {
+                let moved = view.show(ui, &p);
+                // The tab shows the book's own title once it's read.
+                let title = view.title.clone();
+                if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+                    if tab.title != title && !title.trim().is_empty() {
+                        tab.title = title;
+                    }
+                }
+                if moved {
                     self.save_book_progress();
                 }
                 return;
@@ -2344,6 +2401,11 @@ impl ViewerApp {
             .map(|i| self.display_size(i))
             .collect();
         let layout = view::layout_pages(&sizes_disp, zoom, avail.x);
+        if let Some((was, spot)) = self.resize_anchor {
+            if (was - avail).length() > 0.5 && self.scroll_to.is_none() {
+                self.scroll_to = Some(spot);
+            }
+        }
         let scroll = self
             .scrolled(&layout, avail, true)
             .scroll_source(ScrollSource::MOUSE_WHEEL | ScrollSource::SCROLL_BAR);
@@ -2373,6 +2435,20 @@ impl ViewerApp {
         let visible = out.inner;
         self.last_offset = out.state.offset;
         self.central_rect = out.inner_rect;
+        let top = out.state.offset.y;
+        self.resize_anchor = layout
+            .rects
+            .iter()
+            .position(|r| top < r.max.y + PAGE_GAP)
+            .map(|p| {
+                let r = layout.rects[p];
+                let spot = ScrollTarget::Spot {
+                    page: p as i32,
+                    y_frac: (top - r.min.y) / r.height().max(1.0),
+                    x_frac: out.state.offset.x / layout.content.x.max(1.0),
+                };
+                (avail, spot)
+            });
 
         // Track which page the viewport center is on (indicator only — no
         // scroll side effects).
@@ -2411,6 +2487,9 @@ impl ViewerApp {
     }
 
     fn single_view(&mut self, ui: &mut egui::Ui) {
+        // Single pages re-fit on their own; the continuous view's anchor
+        // would be stale when it comes back.
+        self.resize_anchor = None;
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let avail = ui.available_size();
@@ -2768,18 +2847,30 @@ impl eframe::App for ViewerApp {
         self.print_preview_modal(&ctx);
         self.cloud_dialogs(&ctx);
         self.first_run_prompt(&ctx);
-        self.window_edges(&ctx);
-        self.title_bar(ui);
-        self.top_bar(ui);
-        if self.doc.is_some() {
-            self.bottom_bar(ui);
-            // Always called: it slides itself open and shut.
-            self.sidebar_panel(ui);
-        } else if self.book.is_some() {
-            self.book_bar(ui);
-            self.book_sidebar(ui);
+        // Full screen only makes sense with something open to read.
+        if self.immersive && self.doc.is_none() && self.book.is_none() {
+            self.set_immersive(&ctx, false);
+        }
+        if !self.immersive {
+            self.window_edges(&ctx);
+            self.title_bar(ui);
+            self.top_bar(ui);
+            if self.doc.is_some() {
+                self.bottom_bar(ui);
+                // Always called: it slides itself open and shut.
+                self.sidebar_panel(ui);
+            } else if self.book.is_some() {
+                self.book_bar(ui);
+                self.book_sidebar(ui);
+            }
         }
         self.central(ui);
+        if self.immersive {
+            self.immersive_controls(&ctx);
+            if self.book.is_some() {
+                self.save_book_progress();
+            }
+        }
         self.overlays(&ctx);
         #[cfg(debug_assertions)]
         if let Some(a) = &mut self.automation {
@@ -2830,7 +2921,7 @@ impl eframe::App for ViewerApp {
             "default_asked",
             if self.default_asked { "1" } else { "0" }.to_string(),
         );
-        storage.set_string("book_font", format!("{:.1}", self.book_font));
+        storage.set_string("reading", self.reading.encode());
         storage.set_string("ui_scale", format!("{:.2}", self.ui_scale));
         storage.set_string("library_layout", self.library_layout.key().to_string());
         storage.set_string("zoom", zoom_to_str(self.zoom));
@@ -2863,7 +2954,10 @@ mod tests {
         let a = Path::new("/home/me/Study/Notes.pdf");
         assert!(same_path(a, Path::new("/home/me/Study/Notes.pdf")));
         // Only Windows treats these as one file.
-        assert_eq!(same_path(a, Path::new("/home/me/study/notes.pdf")), cfg!(windows));
+        assert_eq!(
+            same_path(a, Path::new("/home/me/study/notes.pdf")),
+            cfg!(windows)
+        );
     }
 
     #[test]

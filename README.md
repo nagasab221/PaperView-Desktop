@@ -28,8 +28,11 @@ There's an eye button next to the page number that does the same with the mouse:
 
 ### 📕 Ebooks, as an open book
 - Reads **EPUB**, **Kindle** (MOBI, AZW3, AZW, PRC — without DRM), **FB2/FBZ**, **CBZ** comics, plain **TXT** and **HTML**.
-- Two facing pages by default, or one page at a time. Turn pages with the arrow keys, Space, the mouse wheel, or a click on either side.
-- Bigger or smaller text (A− / A+, or Ctrl+= / Ctrl+-), a chapter list, and your place remembered in every book.
+- Two facing pages that meet at the spine like an open book, or one page at a time. Turn pages with the arrow keys, Space, the mouse wheel, or a click on either side.
+- **Go straight to any page**: type it into the page box (or press **Ctrl+G**) and press Enter. Or click anywhere on the thin progress line above the bottom bar.
+- **Aa** in the bottom bar picks the typeface (Noto Serif, Literata, Merriweather, EB Garamond, Lora, Source Serif, Noto Sans, Atkinson Hyperlegible or OpenDyslexic), the text size, line spacing, margins, and book-style indented or spaced paragraphs. The same options, with a sample page, are in Settings → Reading.
+- **Full screen** (F11 or ⛶) shows nothing but the pages. A small bar with the page number appears when you move the mouse.
+- The chapter you're in and how many pages are left in it, a chapter list, and your place remembered in every book.
 - A **Books** tab appears in the Library once you've added a book, with covers and how far you've read.
 
 ### 📚 Your library
@@ -93,6 +96,8 @@ Don't want the Cloud tab? Switch it off in Settings.
 | **Ctrl+Tab** / **Ctrl+W** | Next document / close document |
 | **Ctrl+Shift+T** | Reopen the last closed document |
 | **Ctrl+P** / **Ctrl+S** | Print / save a copy |
+| **Ctrl+G** | Go to a page |
+| **F11** / **Esc** | Full screen / leave full screen |
 | **Ctrl+,** | Settings |
 | **← / →**, **Space**, **PgUp / PgDn** | In a book: previous / next page |
 

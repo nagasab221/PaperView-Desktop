@@ -232,6 +232,11 @@ including a red-vs-blue check that would catch BGRA/RGBA channel swaps.
 - PDFium: BSD-3-Clause (Google); `pdfium-render`: MIT/Apache-2.0;
   egui/eframe: MIT/Apache-2.0; rfd: MIT.
 - Noto Sans / Noto Serif (bundled in `assets/fonts`): SIL Open Font License 1.1.
+- Reading faces in `assets/fonts/reading` (Literata, Merriweather, EB Garamond, Lora,
+  Source Serif 4, Noto Sans bold/italic, Atkinson Hyperlegible, OpenDyslexic): all SIL
+  Open Font License 1.1, licence texts alongside. Made from the Google Fonts repository
+  (OpenDyslexic from its own) by `scripts/make_reading_fonts.py`: variable fonts
+  instanced at 400/700, trimmed to Latin, Greek and Cyrillic, hinting dropped.
 
 ## Linux port and redesign (v0.2)
 
@@ -283,3 +288,21 @@ evicted (they reload from disk), and shelves skip off-screen rows. Folders show 
 **Measuring.** `cargo build --profile perf` is release-optimised with the test driver
 compiled in; the driver's `perf start` / `perf stop` steps report frame times. Scrolling
 a 180-PDF folder: avg 16.7 ms, max ~18 ms per frame, first and later launches alike.
+
+## Reading options, page jumps, full screen (v0.4)
+
+**Typography.** `ReadingStyle` (in `app/reader.rs`) is the face, size, line spacing,
+margins and paragraph style, saved as one string under `reading`. `block_job` sets a
+block as an egui layout job; the Settings sample page uses the same function. Each face
+has its own size correction (`BookFont::scale`) so 18 looks like 18 in every face.
+
+**Jumps.** Pages are laid out a few ms per frame, so a page or place may not exist yet.
+A jump is a `Seek`: `Page(n)` (the page box), `Mark` (chapter, progress line) or `Place`
+(the reading position after the layout changed). Pending jumps lay out in bigger slices
+until reached; only `Place` blanks the page meanwhile ("Finding your place…"). Optimised
+build, War and Peace: place found in ~0.2 s, all ~2,700 pages in ~2 s.
+
+**Full screen.** `immersive` skips the title bar, tabs, bars and sidebars; a floating
+pill (`immersive_controls`) shows for 2.2 s after the pointer moves, and the pointer hides.
+The continuous PDF view now keeps its spot across any resize (`resize_anchor`), which
+full screen made obvious.

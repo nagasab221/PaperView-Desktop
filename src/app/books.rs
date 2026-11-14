@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
+use eframe::egui::{self, Align, Layout, Rect, RichText, Sense, Stroke};
 
-use super::reader::{BookView, Mark};
+use super::reader::{BookView, Mark, ReadingStyle, FONT_MAX, FONT_MIN};
 use super::{now_ts, same_path, SidebarMode, Tab, ViewerApp};
 use crate::ui::{theme, widgets as w};
 
@@ -80,7 +80,7 @@ impl ViewerApp {
             .find(|b| same_path(&b.path, path))
             .map(|b| b.mark)
             .unwrap_or_default();
-        let view = BookView::open(path, mark, self.book_spread, self.book_font);
+        let view = BookView::open(path, mark, self.book_spread, self.reading);
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -155,11 +155,22 @@ impl ViewerApp {
 }
 
 impl ViewerApp {
-    pub(super) fn set_book_font(&mut self, size: f32) {
-        self.book_font = size.clamp(super::reader::FONT_MIN, super::reader::FONT_MAX);
+    /// Applies a reading style to the shelf's default and the open book.
+    pub(super) fn set_reading(&mut self, style: ReadingStyle) {
+        self.reading = ReadingStyle {
+            size: style.size.clamp(FONT_MIN, FONT_MAX),
+            ..style
+        };
         if let Some(v) = &mut self.book {
-            v.set_font(self.book_font);
+            v.set_style(self.reading);
         }
+    }
+
+    pub(super) fn bump_book_size(&mut self, delta: f32) {
+        self.set_reading(ReadingStyle {
+            size: self.reading.size + delta,
+            ..self.reading
+        });
     }
 
     pub(super) fn set_book_spread(&mut self, spread: bool) {
@@ -169,8 +180,9 @@ impl ViewerApp {
         }
     }
 
-    /// The reader's bottom bar: pages and chapter on the left; two pages or
-    /// one, and the type size, on the right.
+    /// The reader's bottom bar: the progress line along its top edge; the
+    /// page box and the chapter on the left; reading options, full screen and
+    /// one or two pages on the right.
     pub(super) fn book_bar(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         egui::Panel::bottom("bookbar")
@@ -178,7 +190,7 @@ impl ViewerApp {
             .show_separator_line(false)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                w::hairline(ui);
+                self.progress_rail(ui);
                 let full = ui.available_width();
                 ui.allocate_ui_with_layout(
                     egui::vec2(full, 42.0),
@@ -187,55 +199,19 @@ impl ViewerApp {
                         ui.set_min_height(42.0);
                         ui.spacing_mut().item_spacing.x = 2.0;
                         ui.add_space(10.0);
-                        let glyph = |ui: &mut egui::Ui, g: &str| {
-                            w::button(
-                                ui,
-                                RichText::new(g).size(17.0),
-                                w::Btn::new(w::Kind::Quiet).min(32.0, 32.0),
-                            )
-                        };
-                        let (label, chapter, comic) = match &self.book {
-                            Some(v) => (v.page_label(), v.chapter_title(), v.is_comic()),
-                            None => (String::new(), None, false),
-                        };
-                        if glyph(ui, "‹")
-                            .on_hover_text("Previous page (←, PgUp)")
-                            .clicked()
-                        {
-                            if let Some(v) = &mut self.book {
-                                v.prev();
-                            }
-                        }
-                        ui.label(RichText::new(label).color(p.ink));
-                        if glyph(ui, "›")
-                            .on_hover_text("Next page (→, PgDn, Space)")
-                            .clicked()
-                        {
-                            if let Some(v) = &mut self.book {
-                                v.next();
-                            }
-                        }
-                        if let Some(ch) = chapter {
-                            ui.add_space(12.0);
-                            ui.add(egui::Label::new(RichText::new(ch).color(p.muted)).truncate());
-                        }
+                        self.book_page_controls(ui);
+                        ui.add_space(14.0);
+                        // Right side first, so the chapter gets what's left.
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_space(10.0);
-                            if !comic {
-                                if glyph(ui, "A+")
-                                    .on_hover_text("Larger text (Ctrl+=)")
-                                    .clicked()
-                                {
-                                    self.set_book_font(self.book_font + 1.0);
-                                }
-                                if glyph(ui, "A−")
-                                    .on_hover_text("Smaller text (Ctrl+-)")
-                                    .clicked()
-                                {
-                                    self.set_book_font(self.book_font - 1.0);
-                                }
-                                ui.add_space(14.0);
+                            if w::icon_button(ui, "⛶", "Full screen (F11)", self.immersive)
+                                .clicked()
+                            {
+                                let on = !self.immersive;
+                                self.set_immersive(ui.ctx(), on);
                             }
+                            self.reading_button(ui);
+                            ui.add_space(12.0);
                             let one = w::tool_button(ui, "One page", !self.book_spread);
                             let two = w::tool_button(ui, "Two pages", self.book_spread);
                             if one.clicked() {
@@ -244,11 +220,203 @@ impl ViewerApp {
                             if two.clicked() {
                                 self.set_book_spread(true);
                             }
+                            ui.add_space(12.0);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                self.chapter_note(ui);
+                            });
                         });
                     },
                 );
             });
         self.save_book_progress();
+    }
+
+    /// "‹ [ 12 ] of 1,532 ›": type a page and press Enter to go there.
+    pub(super) fn book_page_controls(&mut self, ui: &mut egui::Ui) {
+        let p = w::pal(ui);
+        let Some(v) = &self.book else { return };
+        let (now, (total, exact)) = (v.page_now(), v.page_total());
+        if super::chrome::step_button(ui, "‹", now > 1)
+            .on_hover_text("Previous page (←, PgUp)")
+            .clicked()
+        {
+            if let Some(v) = &mut self.book {
+                v.prev();
+            }
+        }
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut self.book_page_field)
+                .id(egui::Id::new("page-field"))
+                .desired_width(44.0)
+                .horizontal_align(Align::Center)
+                .background_color(p.surface),
+        );
+        w::select_all_on_focus(ui, &field, &self.book_page_field);
+        let field = field.on_hover_text("Type a page number and press Enter (Ctrl+G)");
+        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let typed = self.book_page_field.trim().replace([',', '.', ' '], "");
+            if let (Ok(n), Some(v)) = (typed.parse::<usize>(), &mut self.book) {
+                v.goto_page(n.max(1) - 1);
+            }
+        }
+        if !field.has_focus() {
+            self.book_page_field = now.to_string();
+        }
+        ui.add_space(4.0);
+        let of = if exact {
+            format!("of {}", thousands(total))
+        } else {
+            format!("of about {}", thousands(total))
+        };
+        ui.label(RichText::new(of).color(p.muted))
+            .on_hover_text(if exact {
+                "Pages at this window size and text size"
+            } else {
+                "Still counting pages…"
+            });
+        ui.add_space(2.0);
+        if super::chrome::step_button(ui, "›", !exact || now < total)
+            .on_hover_text("Next page (→, PgDn, Space)")
+            .clicked()
+        {
+            if let Some(v) = &mut self.book {
+                v.next();
+            }
+        }
+    }
+
+    /// The chapter, and how far it is to the next one, or the page a jump is
+    /// waiting for.
+    fn chapter_note(&mut self, ui: &mut egui::Ui) {
+        let p = w::pal(ui);
+        let Some(v) = &self.book else { return };
+        let mut job = egui::text::LayoutJob::default();
+        let fmt = |color, family| egui::TextFormat {
+            font_id: egui::FontId::new(13.5, family),
+            color,
+            ..Default::default()
+        };
+        if let Some(n) = v.seeking_page() {
+            let text = if n == usize::MAX {
+                "Finding the last page…".to_string()
+            } else {
+                format!("Finding page {}…", thousands(n))
+            };
+            job.append(&text, 0.0, fmt(p.accent, theme::medium()));
+        } else {
+            let chapter = v.chapter_title();
+            if let Some(ch) = &chapter {
+                job.append(ch, 0.0, fmt(p.ink, egui::FontFamily::Proportional));
+            }
+            if let Some(left) = v.pages_left_in_chapter().filter(|_| chapter.is_some()) {
+                let text = match left {
+                    0 => "last page of the chapter".to_string(),
+                    1 => "1 page left in the chapter".to_string(),
+                    n => format!("{n} pages left in the chapter"),
+                };
+                let sep = if job.is_empty() { "" } else { "  ·  " };
+                job.append(
+                    &format!("{sep}{text}"),
+                    0.0,
+                    fmt(p.muted, egui::FontFamily::Proportional),
+                );
+            }
+        }
+        job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width().max(0.0));
+        ui.label(job);
+    }
+
+    /// The thin line along the top of the bar: how far through the book you
+    /// are. Click or drag along it to go anywhere.
+    fn progress_rail(&mut self, ui: &mut egui::Ui) {
+        let p = w::pal(ui);
+        let Some(v) = &self.book else {
+            w::hairline(ui);
+            return;
+        };
+        let progress = v.progress();
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 7.0), Sense::click_and_drag());
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered() || resp.dragged(), 0.12);
+        let line_y = rect.top() + 0.5;
+        ui.painter()
+            .hline(rect.x_range(), line_y, Stroke::new(1.0, p.hairline));
+        let thick = 2.0 + 3.0 * t;
+        let x = rect.left() + width * progress;
+        ui.painter().rect_filled(
+            Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(x, rect.top() + thick),
+            ),
+            0,
+            p.accent,
+        );
+        if t > 0.0 {
+            ui.painter()
+                .circle_filled(egui::pos2(x, rect.top() + thick / 2.0), 5.0 * t, p.accent);
+        }
+        let pointer_f = resp
+            .hover_pos()
+            .or(resp.interact_pointer_pos())
+            .map(|pos| ((pos.x - rect.left()) / width).clamp(0.0, 1.0));
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if let Some(f) = pointer_f {
+            resp.clone().on_hover_text_at_pointer(format!(
+                "{:.0}% through · now at {:.0}%",
+                f * 100.0,
+                progress * 100.0
+            ));
+        }
+        if resp.clicked() || resp.dragged() {
+            if let (Some(pos), Some(v)) = (resp.interact_pointer_pos(), &mut self.book) {
+                v.goto_fraction(((pos.x - rect.left()) / width).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// "Aa": the reading options in a popover.
+    pub(super) fn reading_button(&mut self, ui: &mut egui::Ui) {
+        let p = w::pal(ui);
+        let id = egui::Id::new("reading-popover");
+        let open = egui::Popup::is_id_open(ui.ctx(), id);
+        let resp = w::button(
+            ui,
+            RichText::new("Aa")
+                .family(theme::serif())
+                .size(16.0)
+                .color(if open { p.accent } else { p.ink }),
+            w::Btn::new(if open {
+                w::Kind::Selected
+            } else {
+                w::Kind::Quiet
+            })
+            .min(36.0, 32.0),
+        )
+        .on_hover_text("Typeface, size and spacing");
+        egui::Popup::from_toggle_button_response(&resp)
+            .id(id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .frame(
+                egui::Frame::NONE
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.hairline))
+                    .corner_radius(10)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 6],
+                        blur: 24,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(if p.dark { 120 } else { 40 }),
+                    })
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(|ui| {
+                ui.set_width(300.0);
+                self.reading_controls(ui, true);
+            });
     }
 
     /// Contents for the open book, sliding in like the PDF sidebar.
@@ -333,9 +501,30 @@ impl ViewerApp {
     }
 }
 
+/// 1532 -> "1,532".
+pub(super) fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(thousands(7), "7");
+        assert_eq!(thousands(700), "700");
+        assert_eq!(thousands(1532), "1,532");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
 
     #[test]
     fn shelf_round_trips() {

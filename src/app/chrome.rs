@@ -31,6 +31,90 @@ impl ViewerApp {
         self.cloud_enabled && self.cloud_cfg.ready()
     }
 
+    // ── full screen ──────────────────────────────────────────────────────────
+
+    /// Full screen with nothing but the pages: no title bar, tabs, bars or
+    /// sidebar. Esc or F11 leaves.
+    pub(super) fn set_immersive(&mut self, ctx: &egui::Context, on: bool) {
+        if self.immersive == on {
+            return;
+        }
+        self.immersive = on;
+        self.immersive_stir = Some(Instant::now());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
+    /// In full screen, a small floating bar with the page and the way out.
+    /// It shows while the pointer moves (or rests near the bottom) and fades
+    /// away while you read; the pointer hides too.
+    pub(super) fn immersive_controls(&mut self, ctx: &egui::Context) {
+        const LINGER: Duration = Duration::from_millis(2200);
+        let p = w::pal_ctx(ctx);
+        let (moved, pointer) = ctx.input(|i| {
+            (
+                i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed(),
+                i.pointer.hover_pos(),
+            )
+        });
+        if moved {
+            self.immersive_stir = Some(Instant::now());
+        }
+        let screen = ctx.content_rect();
+        let near_bottom = pointer.is_some_and(|pos| pos.y > screen.bottom() - 110.0);
+        let busy = ctx.memory(|m| m.has_focus(egui::Id::new("page-field")))
+            || egui::Popup::is_id_open(ctx, egui::Id::new("reading-popover"));
+        let recent = self
+            .immersive_stir
+            .map(|t| t.elapsed())
+            .filter(|e| *e < LINGER);
+        let visible = recent.is_some() || near_bottom || busy;
+        if let Some(e) = recent {
+            ctx.request_repaint_after(LINGER - e);
+        }
+        let t = ctx.animate_bool_with_time(egui::Id::new("immersive-pill"), visible, 0.25);
+        if !visible && pointer.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+        if t <= 0.0 {
+            return;
+        }
+        egui::Area::new(egui::Id::new("immersive-pill"))
+            .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -22.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_opacity(t);
+                egui::Frame::NONE
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.hairline))
+                    .corner_radius(22)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 6],
+                        blur: 26,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(if p.dark { 130 } else { 46 }),
+                    })
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if self.book.is_some() {
+                                self.book_page_controls(ui);
+                                ui.add_space(8.0);
+                                self.reading_button(ui);
+                            } else {
+                                self.page_controls(ui);
+                            }
+                            ui.add_space(4.0);
+                            if w::icon_button(ui, "⛶", "Leave full screen (Esc, F11)", true)
+                                .clicked()
+                            {
+                                self.set_immersive(ctx, false);
+                            }
+                        });
+                    });
+            });
+    }
+
     // ── title bar ────────────────────────────────────────────────────────────
 
     /// PaperView draws its own title bar, in the app's colours: the open
@@ -479,6 +563,10 @@ impl ViewerApp {
                     self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
                     ui.close();
                 }
+                if ui.add(item("Full screen", "F11")).clicked() {
+                    ui.close();
+                    self.set_immersive(ctx, true);
+                }
                 if ui.add(item("Rotate left", "")).clicked() {
                     self.rotate_by(-1);
                     ui.close();
@@ -547,12 +635,25 @@ impl ViewerApp {
                     self.set_book_spread(!self.book_spread);
                     ui.close();
                 }
+                if ui.add(item("Full screen", "F11")).clicked() {
+                    ui.close();
+                    self.set_immersive(ctx, true);
+                }
+                if ui.add(item("Go to page…", "Ctrl+G")).clicked() {
+                    ui.close();
+                    self.book_page_field.clear();
+                    ctx.memory_mut(|m| m.request_focus(egui::Id::new("page-field")));
+                }
+                if ui.add(item("Typeface and spacing…", "")).clicked() {
+                    ui.close();
+                    egui::Popup::open_id(ctx, egui::Id::new("reading-popover"));
+                }
                 if ui.add(item("Larger text", "Ctrl+=")).clicked() {
-                    self.set_book_font(self.book_font + 1.0);
+                    self.bump_book_size(1.0);
                     ui.close();
                 }
                 if ui.add(item("Smaller text", "Ctrl+-")).clicked() {
-                    self.set_book_font(self.book_font - 1.0);
+                    self.bump_book_size(-1.0);
                     ui.close();
                 }
                 ui.separator();
@@ -626,7 +727,7 @@ impl ViewerApp {
             });
     }
 
-    fn page_controls(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn page_controls(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         let count = self.page_count();
         if step_button(ui, "‹", self.page_index > 0)
@@ -637,10 +738,12 @@ impl ViewerApp {
         }
         let field = ui.add(
             egui::TextEdit::singleline(&mut self.page_field)
+                .id(egui::Id::new("page-field"))
                 .desired_width(34.0)
                 .horizontal_align(Align::Center)
                 .background_color(p.surface),
         );
+        w::select_all_on_focus(ui, &field, &self.page_field);
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Ok(n) = self.page_field.trim().parse::<i32>() {
                 if (1..=count).contains(&n) {
@@ -1042,7 +1145,7 @@ fn paint_win_glyph(
 }
 
 /// A square glyph button for steppers (page, zoom).
-fn step_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+pub(super) fn step_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
     w::button(
         ui,
         RichText::new(glyph).size(17.0),

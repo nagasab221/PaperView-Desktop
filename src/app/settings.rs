@@ -44,6 +44,10 @@ impl ViewerApp {
         });
         self.density_settings(ui);
 
+        // ── Reading ──────────────────────────────────────────────────────────
+        w::section_heading(ui, "Reading", |_| {});
+        self.reading_settings(ui);
+
         // ── Backblaze B2 ─────────────────────────────────────────────────────
         w::section_heading(ui, "Backblaze B2", |_| {});
         ui.add_space(10.0);
@@ -358,7 +362,8 @@ impl ViewerApp {
 
 const SHORTCUTS: &str = "Shortcuts — Ctrl+O open · Ctrl+F find · Ctrl+P print · \
     Ctrl+W close · Ctrl+Tab next document · Hold Q peek · Tap Q jump to peek spot · \
-    Shift+Q set peek spot · Ctrl+= / Ctrl+- zoom · PgUp / PgDn pages · Alt+Left back";
+    Shift+Q set peek spot · Ctrl+= / Ctrl+- zoom · PgUp / PgDn pages · Ctrl+G go to page · \
+    F11 full screen · Alt+Left back";
 
 /// Whitespace pasted around credentials is the usual reason they're rejected.
 struct B2Trimmed;

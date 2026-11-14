@@ -318,6 +318,7 @@ pub fn install_fonts(ctx: &egui::Context) {
         list.extend(fallbacks.iter().cloned());
         fonts.families.insert(FontFamily::Name(family.into()), list);
     }
+    super::reading::register(&mut fonts, &fallbacks);
     ctx.set_fonts(fonts);
 }
 

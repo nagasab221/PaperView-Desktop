@@ -15,9 +15,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align, FontFamily, FontId, Pos2, Rect, Stroke, Vec2};
+use eframe::egui::{self, Align, FontId, Pos2, Rect, Stroke, Vec2};
 
 use crate::ebook::{self, Block, Book, Content, Run};
+use crate::ui::reading::BookFont;
 use crate::ui::theme::{self, Palette};
 
 /// Where the reader is: a block and a character within it.
@@ -27,10 +28,227 @@ pub(super) struct Mark {
     pub chr: usize,
 }
 
+impl Mark {
+    fn key(self) -> (usize, usize) {
+        (self.block, self.chr)
+    }
+}
+
+/// Space between lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Spacing {
+    Compact,
+    Normal,
+    Relaxed,
+}
+
+impl Spacing {
+    pub const ALL: [Spacing; 3] = [Spacing::Compact, Spacing::Normal, Spacing::Relaxed];
+    pub fn label(self) -> &'static str {
+        match self {
+            Spacing::Compact => "Compact",
+            Spacing::Normal => "Normal",
+            Spacing::Relaxed => "Relaxed",
+        }
+    }
+    fn line(self) -> f32 {
+        match self {
+            Spacing::Compact => 1.36,
+            Spacing::Normal => 1.55,
+            Spacing::Relaxed => 1.8,
+        }
+    }
+}
+
+/// White space around the text on a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Margins {
+    Narrow,
+    Normal,
+    Wide,
+}
+
+impl Margins {
+    pub const ALL: [Margins; 3] = [Margins::Narrow, Margins::Normal, Margins::Wide];
+    pub fn label(self) -> &'static str {
+        match self {
+            Margins::Narrow => "Narrow",
+            Margins::Normal => "Normal",
+            Margins::Wide => "Wide",
+        }
+    }
+    pub fn factor(self) -> f32 {
+        match self {
+            Margins::Narrow => 0.55,
+            Margins::Normal => 1.0,
+            Margins::Wide => 1.55,
+        }
+    }
+}
+
+/// How a book is typeset: the face, its size, and the page's rhythm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ReadingStyle {
+    pub font: BookFont,
+    /// Logical points, before the face's own size correction.
+    pub size: f32,
+    pub spacing: Spacing,
+    pub margins: Margins,
+    /// Paragraphs as in a printed book (first line indented, no gap between
+    /// them) rather than spaced apart as on the web.
+    pub indent: bool,
+}
+
+impl Default for ReadingStyle {
+    fn default() -> Self {
+        ReadingStyle {
+            font: BookFont::NotoSerif,
+            size: 18.0,
+            spacing: Spacing::Normal,
+            margins: Margins::Normal,
+            indent: true,
+        }
+    }
+}
+
+impl ReadingStyle {
+    pub fn encode(&self) -> String {
+        format!(
+            "font={};size={:.1};spacing={};margins={};para={}",
+            self.font.key(),
+            self.size,
+            self.spacing.label().to_ascii_lowercase(),
+            self.margins.label().to_ascii_lowercase(),
+            if self.indent { "indent" } else { "spaced" }
+        )
+    }
+
+    pub fn decode(raw: &str) -> ReadingStyle {
+        let mut s = ReadingStyle::default();
+        for pair in raw.split(';') {
+            let Some((k, v)) = pair.split_once('=') else {
+                continue;
+            };
+            match k {
+                "font" => s.font = BookFont::from_key(v),
+                "size" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        s.size = n.clamp(FONT_MIN, FONT_MAX);
+                    }
+                }
+                "spacing" => {
+                    if let Some(x) = Spacing::ALL
+                        .into_iter()
+                        .find(|x| x.label().eq_ignore_ascii_case(v))
+                    {
+                        s.spacing = x;
+                    }
+                }
+                "margins" => {
+                    if let Some(x) = Margins::ALL
+                        .into_iter()
+                        .find(|x| x.label().eq_ignore_ascii_case(v))
+                    {
+                        s.margins = x;
+                    }
+                }
+                "para" => s.indent = v != "spaced",
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// The size text is actually set at.
+    fn px(&self) -> f32 {
+        self.size * self.font.scale()
+    }
+
+    /// Book typography: a paragraph that follows another is indented, with
+    /// no gap between them (unless the reader prefers spaced paragraphs).
+    fn indented(&self, blocks: &[Block], i: usize) -> bool {
+        self.indent
+            && i > 0
+            && matches!(blocks[i], Block::Para { .. })
+            && matches!(blocks[i - 1], Block::Para { .. })
+    }
+
+    /// Space after a block.
+    pub fn gap_after(&self, block: &Block) -> f32 {
+        match block {
+            Block::Para { .. } if self.indent => self.px() * 0.18,
+            _ => self.px() * 0.55,
+        }
+    }
+}
+
+/// Lays out block `i` of a book as text, in `style`.
+pub(super) fn block_job(
+    style: &ReadingStyle,
+    blocks: &[Block],
+    i: usize,
+    width: f32,
+    ink: egui::Color32,
+) -> Option<egui::text::LayoutJob> {
+    let block = &blocks[i];
+    let px = style.px();
+    let (runs, size, centred, line) = match block {
+        Block::Para { runs } => (runs, px, false, style.spacing.line()),
+        Block::Heading { level, runs } => {
+            let scale = match level {
+                1 => 1.65,
+                2 => 1.4,
+                3 => 1.2,
+                _ => 1.08,
+            };
+            (runs, px * scale, true, 1.3)
+        }
+        _ => return None,
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let mut indent = if style.indented(blocks, i) {
+        px * 1.5
+    } else {
+        0.0
+    };
+    let heading = matches!(block, Block::Heading { .. });
+    for Run { text, style: run } in runs {
+        let family = style.font.family(run.bold || heading, run.italic);
+        job.append(
+            text,
+            std::mem::take(&mut indent),
+            egui::TextFormat {
+                font_id: FontId::new(size, family),
+                color: ink,
+                line_height: Some(size * line),
+                ..Default::default()
+            },
+        );
+    }
+    job.wrap.max_width = width;
+    // Left-aligned: egui's justification spaces out letters as well as
+    // words, which reads worse than a ragged right edge.
+    job.halign = if centred { Align::Center } else { Align::LEFT };
+    Some(job)
+}
+
+/// A jump waiting for pagination to reach it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Seek {
+    /// A page number (0-based), typed into the page box.
+    Page(usize),
+    /// A place in the text: a chapter, or a spot on the progress bar. The
+    /// current pages stay up meanwhile.
+    Mark(Mark),
+    /// The reading position, found again after the type or window changed.
+    /// Nothing is shown until it's found.
+    Place(Mark),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct LayoutKey {
     col: (i32, i32),
-    font: i32,
+    style: ReadingStyle,
     spread: bool,
 }
 
@@ -71,7 +289,12 @@ pub(super) struct BookView {
     loaded: Loaded,
     pub mark: Mark,
     pub spread: bool,
-    pub font: f32,
+    pub style: ReadingStyle,
+    /// A jump waiting for pagination to get there.
+    seek: Option<Seek>,
+    /// Characters before each block (and the total, last), for progress and
+    /// for estimating the page count while pages are still being laid out.
+    chars: Vec<usize>,
     /// Laid-out pages for `key`; more are added each frame until done.
     pages: Vec<Page>,
     key: Option<LayoutKey>,
@@ -90,6 +313,9 @@ pub(super) struct BookView {
     decode_rx: Receiver<Decoded>,
     wheel: f32,
     last_turn: Option<Instant>,
+    /// When the current layout began (reported in debug builds).
+    #[cfg(debug_assertions)]
+    layout_started: Option<Instant>,
 }
 
 /// Font size range, logical points.
@@ -97,7 +323,7 @@ pub(super) const FONT_MIN: f32 = 13.0;
 pub(super) const FONT_MAX: f32 = 30.0;
 
 impl BookView {
-    pub fn open(path: &Path, mark: Mark, spread: bool, font: f32) -> BookView {
+    pub fn open(path: &Path, mark: Mark, spread: bool, style: ReadingStyle) -> BookView {
         let (tx, rx) = channel();
         let p = path.to_path_buf();
         std::thread::spawn(move || {
@@ -113,7 +339,12 @@ impl BookView {
             loaded: Loaded::Loading(rx),
             mark,
             spread,
-            font: font.clamp(FONT_MIN, FONT_MAX),
+            style: ReadingStyle {
+                size: style.size.clamp(FONT_MIN, FONT_MAX),
+                ..style
+            },
+            seek: None,
+            chars: Vec::new(),
             pages: Vec::new(),
             key: None,
             next_block: 0,
@@ -128,6 +359,8 @@ impl BookView {
             decode_rx,
             wheel: 0.0,
             last_turn: None,
+            #[cfg(debug_assertions)]
+            layout_started: None,
         }
     }
 
@@ -143,8 +376,115 @@ impl BookView {
         let Some(book) = self.book() else { return 0.0 };
         match &book.content {
             Content::Comic { pages } => self.cur as f32 / pages.len().max(1) as f32,
-            Content::Text { blocks, .. } => self.mark.block as f32 / blocks.len().max(1) as f32,
+            Content::Text { blocks, .. } => match self.chars.last() {
+                Some(&total) if total > 0 => {
+                    let before = self.chars.get(self.mark.block).copied().unwrap_or(total);
+                    ((before + self.mark.chr) as f32 / total as f32).min(1.0)
+                }
+                _ => self.mark.block as f32 / blocks.len().max(1) as f32,
+            },
         }
+    }
+
+    /// The page shown first (1-based).
+    pub fn page_now(&self) -> usize {
+        self.cur + 1
+    }
+
+    /// How many pages the book has, and whether that's final. While pages
+    /// are still being laid out it's an estimate from how much text is done.
+    pub fn page_total(&self) -> (usize, bool) {
+        let n = self.page_count();
+        if self.done || self.is_comic() {
+            return (n, true);
+        }
+        let total = self.chars.last().copied().unwrap_or(0);
+        let placed = self.chars.get(self.next_block).copied().unwrap_or(total);
+        if placed == 0 || n < 3 {
+            return (n, false);
+        }
+        let estimate = (n as f64 * total as f64 / placed as f64).round() as usize;
+        (estimate.max(n), false)
+    }
+
+    /// Re-finding the reading position after a layout change: page turns
+    /// wait for it, or they'd start from the wrong page.
+    fn finding_place(&self) -> bool {
+        matches!(self.seek, Some(Seek::Place(_))) && self.key.is_some() && !self.is_comic()
+    }
+
+    /// The page a typed jump is waiting for (1-based), while it's laid out.
+    pub fn seeking_page(&self) -> Option<usize> {
+        match self.seek {
+            Some(Seek::Page(n)) => Some(n.saturating_add(1)),
+            _ => None,
+        }
+    }
+
+    /// Jumps to page `page` (0-based), laying pages out first if need be.
+    pub fn goto_page(&mut self, page: usize) {
+        if self.is_comic() || page < self.pages.len() || self.done {
+            let n = self.page_count();
+            if n == 0 {
+                return;
+            }
+            let page = page.min(n - 1);
+            self.cur = page - page % self.step();
+            self.seek = None;
+            self.sync_mark();
+        } else {
+            self.seek = Some(Seek::Page(page));
+        }
+    }
+
+    /// Jumps to a fraction of the way through the book (the progress bar).
+    pub fn goto_fraction(&mut self, f: f32) {
+        let f = f.clamp(0.0, 1.0);
+        if self.is_comic() {
+            let n = self.page_count();
+            self.goto_page(((n as f32 * f) as usize).min(n.saturating_sub(1)));
+            return;
+        }
+        let Some(&total) = self.chars.last() else {
+            return;
+        };
+        let target = (total as f64 * f as f64) as usize;
+        // The block holding that character.
+        let block = self
+            .chars
+            .partition_point(|&c| c <= target)
+            .saturating_sub(1);
+        let block = block.min(self.chars.len().saturating_sub(2));
+        let chr = target.saturating_sub(self.chars[block]);
+        self.seek = Some(Seek::Mark(Mark { block, chr }));
+    }
+
+    /// Pages after the ones showing until the next chapter starts, once
+    /// that far has been laid out.
+    pub fn pages_left_in_chapter(&self) -> Option<usize> {
+        let book = self.book()?;
+        if book.is_comic() || self.pages.is_empty() {
+            return None;
+        }
+        let next = book
+            .chapters
+            .iter()
+            .map(|c| c.block)
+            .find(|&b| b > self.mark.block);
+        let shown_end = (self.cur + self.step()).min(self.pages.len());
+        let end = match next {
+            Some(block) => {
+                let i = self.pages.iter().position(|p| p.start.block >= block);
+                match i {
+                    Some(i) => i,
+                    None if self.done => self.pages.len(),
+                    None => return None,
+                }
+            }
+            None if self.done => self.pages.len(),
+            None => return None,
+        };
+        Some(end.saturating_sub(shown_end))
     }
 
     fn step(&self) -> usize {
@@ -162,26 +502,6 @@ impl BookView {
         }
     }
 
-    /// "12–13 of 341", "12 of 341…" while pages are still being laid out.
-    pub fn page_label(&self) -> String {
-        let n = self.page_count();
-        if n == 0 {
-            return String::new();
-        }
-        let a = self.cur + 1;
-        let b = (self.cur + self.step()).min(n);
-        let more = if self.done || self.book().is_some_and(|b| b.is_comic()) {
-            ""
-        } else {
-            "+"
-        };
-        if b > a {
-            format!("{a}–{b} of {n}{more}")
-        } else {
-            format!("{a} of {n}{more}")
-        }
-    }
-
     /// The chapter the current page is in.
     pub fn chapter_title(&self) -> Option<String> {
         let book = self.book()?;
@@ -193,35 +513,56 @@ impl BookView {
     }
 
     pub fn next(&mut self) {
+        if self.finding_place() {
+            return;
+        }
         let n = self.page_count();
         if self.cur + self.step() < n {
             self.cur += self.step();
         }
+        self.seek = None;
         self.sync_mark();
     }
 
     pub fn prev(&mut self) {
+        if self.finding_place() {
+            return;
+        }
         self.cur = self.cur.saturating_sub(self.step());
+        self.seek = None;
         self.sync_mark();
     }
 
     pub fn first(&mut self) {
+        if self.finding_place() {
+            return;
+        }
         self.cur = 0;
+        self.seek = None;
         self.sync_mark();
     }
 
+    /// The last page; a book still being laid out gets there when it's done.
     pub fn last(&mut self) {
+        if !self.done && !self.is_comic() {
+            self.seek = Some(Seek::Page(usize::MAX));
+            return;
+        }
         let n = self.page_count();
         if n > 0 {
             self.cur = (n - 1) / self.step() * self.step();
         }
+        self.seek = None;
         self.sync_mark();
     }
 
     /// Jumps to a chapter (a block in the text).
     pub fn goto_block(&mut self, block: usize) {
-        self.mark = Mark { block, chr: 0 };
-        self.seek_mark();
+        if self.is_comic() {
+            self.goto_page(block);
+            return;
+        }
+        self.seek = Some(Seek::Mark(Mark { block, chr: 0 }));
     }
 
     pub fn set_spread(&mut self, spread: bool) {
@@ -231,12 +572,78 @@ impl BookView {
         }
     }
 
-    pub fn set_font(&mut self, font: f32) {
-        let font = font.clamp(FONT_MIN, FONT_MAX);
-        if (font - self.font).abs() > 0.01 {
-            self.font = font;
+    pub fn set_style(&mut self, style: ReadingStyle) {
+        let style = ReadingStyle {
+            size: style.size.clamp(FONT_MIN, FONT_MAX),
+            ..style
+        };
+        if style != self.style {
+            self.style = style;
             self.key = None;
         }
+    }
+
+    /// Works on a pending jump: lays out more pages, and lands once the
+    /// target is reached. Returns whether one is still pending.
+    fn resolve_seek(&mut self, ctx: &egui::Context, col: Vec2, p: &Palette, budget: Duration) {
+        let Some(seek) = self.seek else { return };
+        match seek {
+            Seek::Mark(m) | Seek::Place(m) => {
+                // The page holding `m` is final once a later page has begun.
+                let reached = |s: &BookView| {
+                    s.done || s.pages.last().is_some_and(|pg| pg.start.key() > m.key())
+                };
+                if !reached(self) {
+                    self.paginate(ctx, col, p, budget, None);
+                }
+                if reached(self) {
+                    #[cfg(debug_assertions)]
+                    if let Some(t) = self.layout_started {
+                        eprintln!(
+                            "paperview: found the place after {} ms",
+                            t.elapsed().as_millis()
+                        );
+                    }
+                    self.mark = m;
+                    self.seek_mark();
+                    self.seek = None;
+                }
+            }
+            Seek::Page(n) => {
+                if n >= self.pages.len() && !self.done {
+                    self.paginate(ctx, col, p, budget, None);
+                }
+                if n < self.pages.len() || self.done {
+                    self.seek = None;
+                    self.goto_page(n);
+                }
+            }
+        }
+        if self.seek.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Counts characters per block, once the book is in.
+    fn count_chars(&mut self) {
+        let Some(book) = self.book().cloned() else {
+            return;
+        };
+        let Content::Text { blocks, .. } = &book.content else {
+            return;
+        };
+        let mut total = 0usize;
+        self.chars = Vec::with_capacity(blocks.len() + 1);
+        for b in blocks {
+            self.chars.push(total);
+            // An image takes about as long to look at as a paragraph.
+            total += if matches!(b, Block::Image { .. }) {
+                400
+            } else {
+                b.text_len()
+            };
+        }
+        self.chars.push(total);
     }
 
     fn sync_mark(&mut self) {
@@ -269,6 +676,10 @@ impl BookView {
     // ── Layout ───────────────────────────────────────────────────────────────
 
     fn reset_layout(&mut self, key: LayoutKey) {
+        #[cfg(debug_assertions)]
+        {
+            self.layout_started = Some(Instant::now());
+        }
         self.key = Some(key);
         self.pages.clear();
         self.open_page = None;
@@ -277,48 +688,14 @@ impl BookView {
         self.done = false;
     }
 
-    fn job(&self, block: &Block, width: f32, p: &Palette) -> Option<egui::text::LayoutJob> {
-        let (runs, size, family_base, centred, extra) = match block {
-            Block::Para { runs } => (runs, self.font, "serif", false, 1.55),
-            Block::Heading { level, runs } => {
-                let scale = match level {
-                    1 => 1.65,
-                    2 => 1.4,
-                    3 => 1.2,
-                    _ => 1.08,
-                };
-                (runs, self.font * scale, "serif", true, 1.3)
-            }
-            _ => return None,
-        };
-        let _ = family_base;
-        let mut job = egui::text::LayoutJob::default();
-        for Run { text, style } in runs {
-            let family = match (
-                style.bold || matches!(block, Block::Heading { .. }),
-                style.italic,
-            ) {
-                (true, true) => FontFamily::Name("serif-bolditalic".into()),
-                (true, false) => FontFamily::Name("serif-bold".into()),
-                (false, true) => FontFamily::Name("serif-italic".into()),
-                (false, false) => theme::serif(),
-            };
-            job.append(
-                text,
-                0.0,
-                egui::TextFormat {
-                    font_id: FontId::new(size, family),
-                    color: p.ink,
-                    line_height: Some(size * extra),
-                    ..Default::default()
-                },
-            );
-        }
-        job.wrap.max_width = width;
-        // Left-aligned: egui's justification spaces out letters as well as
-        // words, which reads worse than a ragged right edge.
-        job.halign = if centred { Align::Center } else { Align::LEFT };
-        Some(job)
+    fn job(
+        &self,
+        blocks: &[Block],
+        i: usize,
+        width: f32,
+        p: &Palette,
+    ) -> Option<egui::text::LayoutJob> {
+        block_job(&self.style, blocks, i, width, p.ink)
     }
 
     fn image_size(&mut self, id: usize, col: Vec2) -> Vec2 {
@@ -369,7 +746,8 @@ impl BookView {
             return;
         };
         let started = Instant::now();
-        let gap = self.font * 0.55;
+        let px = self.style.px();
+        let gap = px * 0.55;
         while self.next_block < blocks.len() {
             let over_budget = started.elapsed() > budget;
             let reached = until.is_none_or(|u| self.next_block > u);
@@ -425,20 +803,20 @@ impl BookView {
                     self.used += size.y + gap;
                 }
                 block @ (Block::Para { .. } | Block::Heading { .. }) => {
-                    let Some(job) = self.job(block, col.x, p) else {
+                    let Some(job) = self.job(blocks, i, col.x, p) else {
                         continue;
                     };
                     let galley = ctx.fonts_mut(|f| f.layout_job(job));
                     let heading = matches!(block, Block::Heading { .. });
                     let before = if heading && self.used > 0.0 {
-                        self.font * 1.2
+                        px * 1.2
                     } else {
                         0.0
                     };
                     // Keep a heading with at least two lines of what follows.
                     if heading
                         && self.used > 0.0
-                        && self.used + before + galley.size().y + self.font * 3.2 > col.y
+                        && self.used + before + galley.size().y + px * 3.2 > col.y
                     {
                         self.close_page(Mark { block: i, chr: 0 });
                     } else {
@@ -469,7 +847,7 @@ impl BookView {
                     if let Some((start, y, _)) = run_start {
                         self.push_text(i, start..galley.rows.len(), y);
                     }
-                    self.used += gap;
+                    self.used += self.style.gap_after(block);
                 }
             }
         }
@@ -479,6 +857,14 @@ impl BookView {
             self.pages.push(page);
         }
         self.done = true;
+        #[cfg(debug_assertions)]
+        if let Some(t) = self.layout_started.take() {
+            eprintln!(
+                "paperview: laid out {} pages in {} ms",
+                self.pages.len(),
+                t.elapsed().as_millis()
+            );
+        }
     }
 
     fn push_text(&mut self, block: usize, rows: std::ops::Range<usize>, y: f32) {
@@ -546,16 +932,14 @@ impl BookView {
             Loaded::Ready(_) => {}
         }
 
-        // Page geometry: one or two paper pages centred in the area.
-        let margin = Vec2::new(46.0, 54.0);
-        let gutter = 18.0;
-        let max_page_w = if self.spread { 600.0 } else { 700.0 };
-        let avail = area.shrink2(Vec2::new(24.0, 18.0));
+        // Page geometry: one page, or two facing pages that meet at a spine
+        // like an open book, centred in the area.
+        let margin = Vec2::new(46.0 * self.style.margins.factor(), 56.0);
+        let max_page_w = if self.spread { 620.0 } else { 720.0 };
+        let avail = area.shrink2(Vec2::new(28.0, 20.0));
         let page_h = avail.height();
         let page_w = if self.spread {
-            ((avail.width() - gutter) / 2.0)
-                .min(max_page_w)
-                .min(page_h * 0.78)
+            (avail.width() / 2.0).min(max_page_w).min(page_h * 0.78)
         } else {
             avail.width().min(max_page_w).min(page_h * 0.85)
         };
@@ -565,9 +949,12 @@ impl BookView {
         );
         let key = LayoutKey {
             col: (col.x.round() as i32, col.y.round() as i32),
-            font: (self.font * 10.0).round() as i32,
+            style: self.style,
             spread: self.spread,
         };
+        if self.chars.is_empty() {
+            self.count_chars();
+        }
 
         // Re-lay out after a change, but let a window resize settle first.
         let is_comic = self.book().is_some_and(|b| b.is_comic());
@@ -582,16 +969,25 @@ impl BookView {
                 }
             };
             if settle {
-                let mark = self.mark;
+                // Keep the reading position: find it again in the new layout
+                // (a jump already on its way keeps going).
+                let target = match self.seek {
+                    Some(Seek::Page(_)) | None => Seek::Place(self.mark),
+                    Some(seek) => seek,
+                };
                 self.reset_layout(key);
                 self.pending = None;
-                // Lay out as far as the reading position before showing it.
-                self.paginate(&ctx, col, p, Duration::from_millis(4), Some(mark.block));
-                self.mark = mark;
-                self.seek_mark();
+                self.seek = Some(target);
             } else {
                 ctx.request_repaint_after(Duration::from_millis(150));
             }
+        }
+        // A jump lays out in bigger slices, so it lands quickly.
+        if !is_comic && self.key == Some(key) {
+            // Nothing else is on screen while the place is found: use more of
+            // the frame.
+            let budget = if self.finding_place() { 30 } else { 14 };
+            self.resolve_seek(&ctx, col, p, Duration::from_millis(budget));
         }
         if !is_comic && !self.done {
             self.paginate(&ctx, col, p, Duration::from_millis(4), None);
@@ -606,34 +1002,43 @@ impl BookView {
             self.textures.insert(id, tex);
         }
 
-        let n_pages = if self.spread { 2 } else { 1 };
-        let total_w = page_w * n_pages as f32 + gutter * (n_pages - 1) as f32;
-        let left = area.center().x - total_w / 2.0;
-        let top = area.center().y - page_h / 2.0;
+        // Finding the reading position again after the type changed.
+        if self.finding_place() {
+            centred_note(ui, area, p, "Finding your place…", true);
+            return self.after_input(ui, area, before);
+        }
 
+        let n_pages = if self.spread { 2 } else { 1 };
+        let sheet =
+            Rect::from_center_size(area.center(), Vec2::new(page_w * n_pages as f32, page_h));
+        if self.cur < self.page_count() {
+            paint_sheet(ui.painter(), sheet, self.spread && !is_comic, p);
+        }
         for k in 0..n_pages {
             let index = self.cur + k;
             let rect = Rect::from_min_size(
-                Pos2::new(left + k as f32 * (page_w + gutter), top),
+                Pos2::new(sheet.left() + k as f32 * page_w, sheet.top()),
                 Vec2::new(page_w, page_h),
             );
             if index >= self.page_count() {
                 continue;
             }
-            ui.painter().rect(
-                rect,
-                3,
-                p.surface,
-                Stroke::new(1.0, p.hairline),
-                egui::StrokeKind::Outside,
-            );
             if is_comic {
                 self.draw_comic_page(ui, index, rect.shrink(10.0), p);
             } else {
-                self.draw_text_page(ui, &ctx, index, rect, margin, col, p);
+                let side = match (self.spread, k) {
+                    (false, _) => Side::Single,
+                    (true, 0) => Side::Left,
+                    _ => Side::Right,
+                };
+                self.draw_text_page(ui, &ctx, index, rect, side, margin, col, p);
             }
         }
+        self.after_input(ui, area, before)
+    }
 
+    /// Page turns from clicks and the wheel; true when the position moved.
+    fn after_input(&mut self, ui: &mut egui::Ui, area: Rect, before: (usize, Mark)) -> bool {
         // Clicking the left or right part of the spread turns the page.
         let resp = ui.interact(area, ui.id().with("book-turn"), egui::Sense::click());
         if resp.clicked() {
@@ -672,6 +1077,7 @@ impl BookView {
         ctx: &egui::Context,
         index: usize,
         rect: Rect,
+        side: Side,
         margin: Vec2,
         col: Vec2,
         p: &Palette,
@@ -685,24 +1091,45 @@ impl BookView {
         let origin = rect.min + margin;
         let painter = ui.painter_at(rect);
 
-        // Running head: the book on the left page, the chapter on the right.
-        let head = if index.is_multiple_of(2) || !self.spread {
-            self.title.clone()
-        } else {
+        // Running head, in small letterspaced capitals: the book on the left
+        // page, the chapter on the right.
+        let head = if side == Side::Right {
             self.chapter_title().unwrap_or_else(|| self.title.clone())
+        } else {
+            self.title.clone()
         };
-        painter.text(
-            Pos2::new(rect.center().x, rect.top() + margin.y * 0.45),
-            egui::Align2::CENTER_CENTER,
-            truncate(&head, 60),
-            FontId::new(11.0, theme::medium()),
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            &head.to_uppercase(),
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::new(10.0, theme::medium()),
+                color: p.muted,
+                extra_letter_spacing: 1.4,
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(col.x);
+        let galley = ctx.fonts_mut(|f| f.layout_job(job));
+        painter.galley(
+            Pos2::new(
+                rect.center().x - galley.size().x / 2.0,
+                rect.top() + margin.y * 0.45 - galley.size().y / 2.0,
+            ),
+            galley,
             p.muted,
         );
+        // Folio: at the outer corner of a spread, centred on a single page.
+        let (anchor, x) = match side {
+            Side::Left => (egui::Align2::LEFT_CENTER, origin.x),
+            Side::Right => (egui::Align2::RIGHT_CENTER, origin.x + col.x),
+            Side::Single => (egui::Align2::CENTER_CENTER, rect.center().x),
+        };
         painter.text(
-            Pos2::new(rect.center().x, rect.bottom() - margin.y * 0.45),
-            egui::Align2::CENTER_CENTER,
+            Pos2::new(x, rect.bottom() - margin.y * 0.45),
+            anchor,
             (index + 1).to_string(),
-            FontId::new(11.0, FontFamily::Proportional),
+            FontId::new(12.0, self.style.font.family(false, false)),
             p.muted,
         );
 
@@ -721,7 +1148,7 @@ impl BookView {
             }
         }
         for (block, rows, y) in texts {
-            let Some(job) = self.job(&blocks[block], col.x, p) else {
+            let Some(job) = self.job(blocks, block, col.x, p) else {
                 continue;
             };
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
@@ -870,6 +1297,57 @@ impl BookView {
     }
 }
 
+/// Which page of the view a page is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Single,
+    Left,
+    Right,
+}
+
+/// The paper: a soft shadow under it and, for two pages, the fold of an
+/// open book, shaded towards the spine.
+fn paint_sheet(painter: &egui::Painter, sheet: Rect, spine: bool, p: &Palette) {
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 4],
+        blur: 24,
+        spread: 0,
+        color: egui::Color32::from_black_alpha(if p.dark { 110 } else { 34 }),
+    };
+    painter.add(shadow.as_shape(sheet, 4));
+    painter.rect(
+        sheet,
+        4,
+        p.surface,
+        Stroke::new(1.0, p.hairline.gamma_multiply(0.7)),
+        egui::StrokeKind::Outside,
+    );
+    if !spine {
+        return;
+    }
+    let x = sheet.center().x;
+    let shade = egui::Color32::from_black_alpha(if p.dark { 60 } else { 20 });
+    let clear = egui::Color32::TRANSPARENT;
+    let mut mesh = egui::Mesh::default();
+    let mut band = |left: f32, right: f32, a: egui::Color32, b: egui::Color32| {
+        let i = mesh.vertices.len() as u32;
+        mesh.colored_vertex(Pos2::new(left, sheet.top()), a);
+        mesh.colored_vertex(Pos2::new(right, sheet.top()), b);
+        mesh.colored_vertex(Pos2::new(right, sheet.bottom()), b);
+        mesh.colored_vertex(Pos2::new(left, sheet.bottom()), a);
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i, i + 2, i + 3);
+    };
+    band(x - 44.0, x, clear, shade);
+    band(x, x + 26.0, shade, clear);
+    painter.add(mesh);
+    painter.vline(
+        x,
+        sheet.y_range(),
+        Stroke::new(1.0, p.hairline.gamma_multiply(0.8)),
+    );
+}
+
 /// Decodes and, if wider than `max_w`, scales down an image.
 fn decode_image(bytes: &[u8], max_w: u32) -> Option<egui::ColorImage> {
     let img = image::load_from_memory(bytes).ok()?;
@@ -889,14 +1367,6 @@ fn decode_image(bytes: &[u8], max_w: u32) -> Option<egui::ColorImage> {
 /// Titles can carry line breaks ("PRIDE.\nand\nPREJUDICE"): one line please.
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(n).collect::<String>())
-    }
 }
 
 fn centred_note(ui: &mut egui::Ui, area: Rect, p: &Palette, text: &str, spinning: bool) {
@@ -920,4 +1390,30 @@ fn centred_note(ui: &mut egui::Ui, area: Rect, p: &Palette, text: &str, spinning
         FontId::proportional(14.5),
         p.muted,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reading_style_round_trips() {
+        let style = ReadingStyle {
+            font: BookFont::Garamond,
+            size: 21.0,
+            spacing: Spacing::Relaxed,
+            margins: Margins::Wide,
+            indent: false,
+        };
+        assert_eq!(ReadingStyle::decode(&style.encode()), style);
+    }
+
+    #[test]
+    fn reading_style_survives_junk() {
+        let s = ReadingStyle::decode("font=nope;size=999;spacing=x;stray");
+        assert_eq!(s.font, BookFont::NotoSerif);
+        assert_eq!(s.size, FONT_MAX);
+        assert_eq!(s.spacing, Spacing::Normal);
+        assert_eq!(ReadingStyle::decode(""), ReadingStyle::default());
+    }
 }
