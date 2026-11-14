@@ -33,8 +33,7 @@ impl ViewerApp {
         ui.add_space(16.0);
         w::field_label(ui, "Style");
         ui.add_space(4.0);
-        // Four to a row (two when narrow): the classics on one row, the
-        // eight colours on two.
+        // One grid, four to a row (two when narrow), Paper first.
         let dark = self.theme.is_dark(&ctx);
         let gap = 12.0;
         let cols = if ui.available_width() >= 760.0 {
@@ -43,20 +42,14 @@ impl ViewerApp {
             2.0
         };
         let card_w = ((ui.available_width().min(1100.0) - gap * (cols - 1.0)) / cols).floor();
-        let (classic, colour) = Skin::ALL.split_at(3);
-        for (title, skins) in [("Classic", classic), ("Colour", colour)] {
-            ui.label(RichText::new(title).small().color(p.muted));
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-                for &skin in skins {
-                    if skin_card(ui, skin, dark, skin == self.skin, card_w).clicked() {
-                        self.skin = skin;
-                    }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+            for skin in Skin::ALL {
+                if skin_card(ui, skin, dark, skin == self.skin, card_w).clicked() {
+                    self.skin = skin;
                 }
-            });
-            ui.add_space(10.0);
-        }
+            }
+        });
         self.density_settings(ui);
 
         // ── Reading ──────────────────────────────────────────────────────────
