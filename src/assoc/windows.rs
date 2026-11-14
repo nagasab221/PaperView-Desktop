@@ -38,14 +38,7 @@ pub fn register() -> Result<(), String> {
     let exe = exe.display().to_string();
     let icon = format!("\"{exe}\",0");
     let open = format!("\"{exe}\" \"%1\"");
-    reg(&[
-        "add",
-        PROGID,
-        "/ve",
-        "/d",
-        "PDF Document (PaperView)",
-        "/f",
-    ])?;
+    reg(&["add", PROGID, "/ve", "/d", "PDF Document (PaperView)", "/f"])?;
     let icon_key = format!(r"{PROGID}\DefaultIcon");
     reg(&["add", &icon_key, "/ve", "/d", &icon, "/f"])?;
     let cmd_key = format!(r"{PROGID}\shell\open\command");

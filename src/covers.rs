@@ -48,7 +48,11 @@ impl Key {
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        Some(Key { path: path.to_path_buf(), len: meta.len(), modified })
+        Some(Key {
+            path: path.to_path_buf(),
+            len: meta.len(),
+            modified,
+        })
     }
 
     fn cache_file(&self) -> PathBuf {
@@ -130,7 +134,12 @@ fn load_png(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
     match info.color_type {
         png::ColorType::Rgba => Some((w, h, buf)),
         png::ColorType::Rgb => {
-            let rgba = buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+            let rgba = buf
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect();
             Some((w, h, rgba))
         }
         _ => None,
@@ -184,7 +193,9 @@ fn produce(engine: PdfEngine, key: &Key, want_pixels: bool) -> Option<(usize, us
         let bytes = crate::ebook::cover(&key.path)?;
         let img = image::load_from_memory(&bytes).ok()?;
         let h = (img.height() as u64 * COVER_PX as u64 / img.width().max(1) as u64).max(1) as u32;
-        let rgba = img.resize_exact(COVER_PX as u32, h, image::imageops::FilterType::Triangle).to_rgba8();
+        let rgba = img
+            .resize_exact(COVER_PX as u32, h, image::imageops::FilterType::Triangle)
+            .to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         let px = rgba.into_raw();
         let _ = save_png(&file, w, h, &px);
@@ -196,7 +207,12 @@ fn produce(engine: PdfEngine, key: &Key, want_pixels: bool) -> Option<(usize, us
     Some((r.width, r.height, r.rgba))
 }
 
-fn worker(engine: PdfEngine, shared: Arc<Shared>, done: std::sync::mpsc::Sender<Done>, ctx: egui::Context) {
+fn worker(
+    engine: PdfEngine,
+    shared: Arc<Shared>,
+    done: std::sync::mpsc::Sender<Done>,
+    ctx: egui::Context,
+) {
     loop {
         let job = {
             let mut q = shared.queues.lock().unwrap_or_else(|p| p.into_inner());
@@ -212,7 +228,9 @@ fn worker(engine: PdfEngine, shared: Arc<Shared>, done: std::sync::mpsc::Sender<
         };
         let out = match job {
             Job::Load(key) => match produce(engine, &key, true) {
-                Some((w, h, px)) => Done::Pixels(key, egui::ColorImage::from_rgba_unmultiplied([w, h], &px)),
+                Some((w, h, px)) => {
+                    Done::Pixels(key, egui::ColorImage::from_rgba_unmultiplied([w, h], &px))
+                }
                 None => Done::Failed(key),
             },
             Job::Prepare(key) => {
@@ -289,7 +307,10 @@ impl Covers {
     fn shared(&mut self, ctx: &egui::Context) -> Option<Arc<Shared>> {
         if self.shared.is_none() {
             let engine = self.engine?;
-            let shared = Arc::new(Shared { queues: Mutex::default(), wake: Condvar::new() });
+            let shared = Arc::new(Shared {
+                queues: Mutex::default(),
+                wake: Condvar::new(),
+            });
             let (s, tx, c) = (shared.clone(), self.done_tx.clone(), ctx.clone());
             std::thread::Builder::new()
                 .name("covers".into())
@@ -302,8 +323,13 @@ impl Covers {
 
     /// Records what a folder scan already learnt, so nothing has to stat it.
     pub fn seed(&mut self, path: &Path, len: u64, modified: u64) {
-        let key = Key { path: path.to_path_buf(), len, modified };
-        self.facts.insert(path.to_path_buf(), (Some(key), std::time::Instant::now()));
+        let key = Key {
+            path: path.to_path_buf(),
+            len,
+            modified,
+        };
+        self.facts
+            .insert(path.to_path_buf(), (Some(key), std::time::Instant::now()));
     }
 
     /// Asks the stat thread about a file.
@@ -315,15 +341,17 @@ impl Covers {
             let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
             let done = self.done_tx.clone();
             let ctx = ctx.clone();
-            let spawned = std::thread::Builder::new().name("stat".into()).spawn(move || {
-                for path in rx {
-                    let key = Key::of(&path);
-                    if done.send(Done::Stat(path, key)).is_err() {
-                        return;
+            let spawned = std::thread::Builder::new()
+                .name("stat".into())
+                .spawn(move || {
+                    for path in rx {
+                        let key = Key::of(&path);
+                        if done.send(Done::Stat(path, key)).is_err() {
+                            return;
+                        }
+                        ctx.request_repaint();
                     }
-                    ctx.request_repaint();
-                }
-            });
+                });
             if spawned.is_err() {
                 return;
             }
@@ -458,7 +486,13 @@ impl Covers {
                 Done::Failed(key) => {
                     self.loading.remove(&key);
                     self.prepared.insert(key.path.clone());
-                    self.textures.insert(key, Entry { cover: Cover::Unavailable, last_used: self.frame });
+                    self.textures.insert(
+                        key,
+                        Entry {
+                            cover: Cover::Unavailable,
+                            last_used: self.frame,
+                        },
+                    );
                 }
             }
         }
@@ -467,7 +501,9 @@ impl Covers {
             if started.elapsed() > UPLOAD_BUDGET {
                 break;
             }
-            let Some((key, image)) = self.pending_upload.pop_front() else { break };
+            let Some((key, image)) = self.pending_upload.pop_front() else {
+                break;
+            };
             let tex = ctx.load_texture(
                 format!("cover-{}", key.path.display()),
                 image,
@@ -477,15 +513,24 @@ impl Covers {
             self.prepared.insert(key.path.clone());
             // A newer version of the same file supersedes the old cover.
             self.textures.retain(|k, _| k.path != key.path);
-            self.textures.insert(key, Entry { cover: Cover::Ready(tex), last_used: self.frame });
+            self.textures.insert(
+                key,
+                Entry {
+                    cover: Cover::Ready(tex),
+                    last_used: self.frame,
+                },
+            );
         }
         if !self.pending_upload.is_empty() {
             ctx.request_repaint();
         }
         // Keep GPU memory bounded: drop what hasn't been drawn lately.
         if self.textures.len() > MAX_TEXTURES {
-            let mut by_age: Vec<(u64, Key)> =
-                self.textures.iter().map(|(k, e)| (e.last_used, k.clone())).collect();
+            let mut by_age: Vec<(u64, Key)> = self
+                .textures
+                .iter()
+                .map(|(k, e)| (e.last_used, k.clone()))
+                .collect();
             by_age.sort_by_key(|(t, _)| *t);
             let excess = self.textures.len() - MAX_TEXTURES;
             for (_, k) in by_age.into_iter().take(excess) {

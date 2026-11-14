@@ -127,9 +127,7 @@ impl SearchState {
             .current
             .and_then(|c| self.order.iter().position(|&o| o == c));
         let next_pos = match cur_pos {
-            Some(p) => {
-                (p as i64 + dir as i64).rem_euclid(self.order.len() as i64) as usize
-            }
+            Some(p) => (p as i64 + dir as i64).rem_euclid(self.order.len() as i64) as usize,
             None => {
                 if dir >= 0 {
                     0

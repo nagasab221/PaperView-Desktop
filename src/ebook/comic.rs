@@ -51,7 +51,12 @@ pub fn open(path: &Path) -> Result<Book, String> {
     if pages.is_empty() {
         return Err("There are no pages in this comic".into());
     }
-    Ok(Book { title: String::new(), author: None, content: Content::Comic { pages }, chapters: Vec::new() })
+    Ok(Book {
+        title: String::new(),
+        author: None,
+        content: Content::Comic { pages },
+        chapters: Vec::new(),
+    })
 }
 
 pub fn page(path: &Path, name: &str) -> Option<Vec<u8>> {

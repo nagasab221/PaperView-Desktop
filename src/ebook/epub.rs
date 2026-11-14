@@ -33,7 +33,9 @@ fn resolve(base: &str, href: &str) -> String {
     if href.is_empty() {
         return base.to_string();
     }
-    let mut parts: Vec<&str> = base.rsplit_once('/').map_or(vec![], |(d, _)| d.split('/').collect());
+    let mut parts: Vec<&str> = base
+        .rsplit_once('/')
+        .map_or(vec![], |(d, _)| d.split('/').collect());
     for seg in href.split('/') {
         match seg {
             "" | "." => {}
@@ -47,7 +49,9 @@ fn resolve(base: &str, href: &str) -> String {
 }
 
 fn fragment(href: &str) -> Option<&str> {
-    href.split_once('#').map(|(_, f)| f).filter(|f| !f.is_empty())
+    href.split_once('#')
+        .map(|(_, f)| f)
+        .filter(|f| !f.is_empty())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -69,7 +73,10 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    attrs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
 }
 
 struct Package {
@@ -120,7 +127,8 @@ fn package(zip: &mut Archive) -> Result<Package, String> {
                         if props.split_whitespace().any(|x| x == "cover-image") {
                             p.cover_id = Some(id.to_string());
                         }
-                        p.manifest.insert(id.to_string(), (resolve(&opf_path, href), media, props));
+                        p.manifest
+                            .insert(id.to_string(), (resolve(&opf_path, href), media, props));
                     }
                 }
                 "itemref" => {
@@ -131,10 +139,9 @@ fn package(zip: &mut Archive) -> Result<Package, String> {
                     }
                 }
                 "spine" => p.ncx = attr(attrs, "toc").map(|s| s.to_string()),
-                "meta"
-                    if attr(attrs, "name") == Some("cover") && p.cover_id.is_none() => {
-                        p.cover_id = attr(attrs, "content").map(|s| s.to_string());
-                    }
+                "meta" if attr(attrs, "name") == Some("cover") && p.cover_id.is_none() => {
+                    p.cover_id = attr(attrs, "content").map(|s| s.to_string());
+                }
                 _ => {}
             },
             Token::Text(text) => match in_tag {
@@ -154,7 +161,11 @@ fn package(zip: &mut Archive) -> Result<Package, String> {
 /// Table of contents entries: (title, href inside the zip incl. #fragment).
 fn toc(zip: &mut Archive, p: &Package) -> Vec<(String, String)> {
     // EPUB 3: the nav document.
-    if let Some((href, _, _)) = p.manifest.values().find(|(_, _, props)| props.contains("nav")) {
+    if let Some((href, _, _)) = p
+        .manifest
+        .values()
+        .find(|(_, _, props)| props.contains("nav"))
+    {
         if let Some(src) = read_text(zip, href) {
             let mut out = Vec::new();
             let mut in_toc = false;
@@ -162,8 +173,14 @@ fn toc(zip: &mut Archive, p: &Package) -> Vec<(String, String)> {
             let mut current: Option<(String, String)> = None;
             for t in tokenize(&src) {
                 match t {
-                    Token::Start { name, attrs, closed } if name == "nav" && !closed => {
-                        let kind = attr(&attrs, "epub:type").or(attr(&attrs, "type")).unwrap_or("");
+                    Token::Start {
+                        name,
+                        attrs,
+                        closed,
+                    } if name == "nav" && !closed => {
+                        let kind = attr(&attrs, "epub:type")
+                            .or(attr(&attrs, "type"))
+                            .unwrap_or("");
                         if kind.contains("toc") || !in_toc && out.is_empty() {
                             in_toc = true;
                             depth = 1;
@@ -207,10 +224,18 @@ fn toc(zip: &mut Archive, p: &Package) -> Vec<(String, String)> {
         .ncx
         .as_ref()
         .and_then(|id| p.manifest.get(id))
-        .or_else(|| p.manifest.values().find(|(_, m, _)| m == "application/x-dtbncx+xml"))
+        .or_else(|| {
+            p.manifest
+                .values()
+                .find(|(_, m, _)| m == "application/x-dtbncx+xml")
+        })
         .map(|(h, _, _)| h.clone());
-    let Some(href) = ncx_href else { return Vec::new() };
-    let Some(src) = read_text(zip, &href) else { return Vec::new() };
+    let Some(href) = ncx_href else {
+        return Vec::new();
+    };
+    let Some(src) = read_text(zip, &href) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut label = String::new();
     let mut in_text = false;
@@ -244,11 +269,19 @@ pub fn open(path: &Path) -> Result<Book, String> {
     let mut all_blocks = Vec::new();
     let mut anchors: HashMap<String, usize> = HashMap::new();
     for idref in &pkg.spine {
-        let Some((href, media, _)) = pkg.manifest.get(idref).cloned() else { continue };
-        if !(media.contains("html") || media.contains("xml") || href.ends_with("htm") || href.ends_with("html")) {
+        let Some((href, media, _)) = pkg.manifest.get(idref).cloned() else {
+            continue;
+        };
+        if !(media.contains("html")
+            || media.contains("xml")
+            || href.ends_with("htm")
+            || href.ends_with("html"))
+        {
             continue;
         }
-        let Some(src) = read_text(&mut zip, &href) else { continue };
+        let Some(src) = read_text(&mut zip, &href) else {
+            continue;
+        };
         let chapter_href = href.clone();
         let mut resolve_image = |r: &str| -> Option<usize> {
             let target = resolve(&chapter_href, r);
@@ -266,7 +299,11 @@ pub fn open(path: &Path) -> Result<Book, String> {
         let (blocks, local) = b.finish();
         let offset = all_blocks.len();
         for (id, at) in local {
-            let key = if id == href { href.clone() } else { format!("{href}#{id}") };
+            let key = if id == href {
+                href.clone()
+            } else {
+                format!("{href}#{id}")
+            };
             anchors.entry(key).or_insert(offset + at);
         }
         all_blocks.extend(blocks);
@@ -278,14 +315,20 @@ pub fn open(path: &Path) -> Result<Book, String> {
             let block = anchors
                 .get(&href)
                 .or_else(|| anchors.get(href.split('#').next().unwrap_or("")))?;
-            Some(Chapter { title, block: *block })
+            Some(Chapter {
+                title,
+                block: *block,
+            })
         })
         .collect();
 
     Ok(Book {
         title: pkg.title,
         author: pkg.author,
-        content: Content::Text { blocks: all_blocks, images },
+        content: Content::Text {
+            blocks: all_blocks,
+            images,
+        },
         chapters,
     })
 }
@@ -320,8 +363,14 @@ mod tests {
 
     #[test]
     fn hrefs_resolve_inside_the_zip() {
-        assert_eq!(resolve("OEBPS/content.opf", "Text/ch1.xhtml"), "OEBPS/Text/ch1.xhtml");
-        assert_eq!(resolve("OEBPS/Text/ch1.xhtml", "../Images/a%20b.jpg"), "OEBPS/Images/a b.jpg");
+        assert_eq!(
+            resolve("OEBPS/content.opf", "Text/ch1.xhtml"),
+            "OEBPS/Text/ch1.xhtml"
+        );
+        assert_eq!(
+            resolve("OEBPS/Text/ch1.xhtml", "../Images/a%20b.jpg"),
+            "OEBPS/Images/a b.jpg"
+        );
         assert_eq!(resolve("ch1.html", "ch2.html#x"), "ch2.html");
         assert_eq!(fragment("ch2.html#x"), Some("x"));
     }

@@ -80,7 +80,13 @@ impl ViewerApp {
         ui.add_space(14.0);
 
         w::field_label(ui, "Key ID");
-        w::field(ui, &mut self.b2_draft.key_id, "e.g. 005a1b2c3d4e5f60000000001", false, 380.0);
+        w::field(
+            ui,
+            &mut self.b2_draft.key_id,
+            "e.g. 005a1b2c3d4e5f60000000001",
+            false,
+            380.0,
+        );
         ui.add_space(8.0);
         w::field_label(ui, "Application key");
         ui.horizontal(|ui| {
@@ -91,7 +97,8 @@ impl ViewerApp {
                 !self.show_app_key,
                 380.0,
             );
-            if w::inline_button(ui, if self.show_app_key { "Hide" } else { "Show" }, true).clicked() {
+            if w::inline_button(ui, if self.show_app_key { "Hide" } else { "Show" }, true).clicked()
+            {
                 self.show_app_key = !self.show_app_key;
             }
         });
@@ -105,12 +112,23 @@ impl ViewerApp {
         }
         ui.add_space(8.0);
         w::field_label(ui, "Bucket name");
-        w::field(ui, &mut self.b2_draft.bucket, "Exactly as it appears in Backblaze", false, 380.0);
+        w::field(
+            ui,
+            &mut self.b2_draft.bucket,
+            "Exactly as it appears in Backblaze",
+            false,
+            380.0,
+        );
         ui.add_space(14.0);
         ui.horizontal(|ui| {
             let changed = self.b2_draft != self.cloud_cfg;
-            let label = if changed || !ready { "Save and connect" } else { "Saved" };
-            if w::primary_button(ui, label, self.b2_draft.ready() && (changed || !ready)).clicked() {
+            let label = if changed || !ready {
+                "Save and connect"
+            } else {
+                "Saved"
+            };
+            if w::primary_button(ui, label, self.b2_draft.ready() && (changed || !ready)).clicked()
+            {
                 self.cloud_cfg = B2Trimmed::trim(self.b2_draft.clone());
                 self.b2_draft = self.cloud_cfg.clone();
                 self.cloud_files.clear();
@@ -143,16 +161,25 @@ impl ViewerApp {
         let active = self.cloud_active();
         let sub = format!("Upload every PDF you open, up to {} MB", self.auto_save_mb);
         let mut auto = self.auto_save && active;
-        w::row(ui, false, Some("⬆"), "Auto-save opened PDFs", Some(&sub), |ui| {
-            ui.add_space(4.0);
-            if w::switch(ui, &mut auto, active).changed() {
-                self.auto_save = auto;
-            }
-            ui.add_enabled(
-                active && self.auto_save,
-                egui::DragValue::new(&mut self.auto_save_mb).range(1..=500).suffix(" MB"),
-            );
-        });
+        w::row(
+            ui,
+            false,
+            Some("⬆"),
+            "Auto-save opened PDFs",
+            Some(&sub),
+            |ui| {
+                ui.add_space(4.0);
+                if w::switch(ui, &mut auto, active).changed() {
+                    self.auto_save = auto;
+                }
+                ui.add_enabled(
+                    active && self.auto_save,
+                    egui::DragValue::new(&mut self.auto_save_mb)
+                        .range(1..=500)
+                        .suffix(" MB"),
+                );
+            },
+        );
         w::hairline(ui);
 
         // ── Storage ──────────────────────────────────────────────────────────
@@ -164,11 +191,18 @@ impl ViewerApp {
             cloud::fmt_size(bytes)
         );
         let mut clear = false;
-        w::row(ui, false, Some("⬇"), "Downloaded documents", Some(&sub), |ui| {
-            if w::inline_button(ui, "Clear", n > 0).clicked() {
-                clear = true;
-            }
-        });
+        w::row(
+            ui,
+            false,
+            Some("⬇"),
+            "Downloaded documents",
+            Some(&sub),
+            |ui| {
+                if w::inline_button(ui, "Clear", n > 0).clicked() {
+                    clear = true;
+                }
+            },
+        );
         w::hairline(ui);
         if clear {
             if let Ok(dir) = std::fs::read_dir(cloud::cache_dir()) {
@@ -188,11 +222,18 @@ impl ViewerApp {
             cloud::fmt_size(cbytes)
         );
         let mut clear_covers = false;
-        w::row(ui, false, Some("🖼"), "Cover thumbnails", Some(&sub), |ui| {
-            if w::inline_button(ui, "Clear", cn > 0).clicked() {
-                clear_covers = true;
-            }
-        });
+        w::row(
+            ui,
+            false,
+            Some("🖼"),
+            "Cover thumbnails",
+            Some(&sub),
+            |ui| {
+                if w::inline_button(ui, "Clear", cn > 0).clicked() {
+                    clear_covers = true;
+                }
+            },
+        );
         w::hairline(ui);
         if clear_covers {
             crate::covers::clear_cache();
@@ -202,7 +243,9 @@ impl ViewerApp {
 
         // ── System ───────────────────────────────────────────────────────────
         w::section_heading(ui, "System", |_| {});
-        let is_default = *self.default_status.get_or_insert_with(crate::assoc::is_default);
+        let is_default = *self
+            .default_status
+            .get_or_insert_with(crate::assoc::is_default);
         let sub = if is_default {
             "PDFs and ebooks open with PaperView"
         } else if cfg!(target_os = "windows") {
@@ -212,15 +255,25 @@ impl ViewerApp {
         };
         let mut make = false;
         let mut remove = false;
-        w::row(ui, false, Some("📄"), "Default app for PDFs and books", Some(sub), |ui| {
-            if is_default {
-                if w::inline_button(ui, "Undo", true).on_hover_text("Remove PaperView from the Open with list").clicked() {
-                    remove = true;
+        w::row(
+            ui,
+            false,
+            Some("📄"),
+            "Default app for PDFs and books",
+            Some(sub),
+            |ui| {
+                if is_default {
+                    if w::inline_button(ui, "Undo", true)
+                        .on_hover_text("Remove PaperView from the Open with list")
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                } else if w::primary_button(ui, "Make default", true).clicked() {
+                    make = true;
                 }
-            } else if w::primary_button(ui, "Make default", true).clicked() {
-                make = true;
-            }
-        });
+            },
+        );
         w::hairline(ui);
         if make {
             self.make_default_app();
@@ -326,7 +379,11 @@ fn skin_card(ui: &mut egui::Ui, skin: Skin, dark: bool, selected: bool) -> egui:
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 6, sp.background);
-    let border = if selected { current.accent } else { current.hairline };
+    let border = if selected {
+        current.accent
+    } else {
+        current.hairline
+    };
     painter.rect_stroke(
         rect,
         6,
@@ -353,7 +410,11 @@ fn skin_card(ui: &mut egui::Ui, skin: Skin, dark: bool, selected: bool) -> egui:
         egui::FontId::new(10.5, egui::FontFamily::Proportional),
         sp.muted,
     );
-    painter.circle_filled(egui::pos2(rect.right() - 20.0, rect.top() + 22.0), 7.0, sp.accent);
+    painter.circle_filled(
+        egui::pos2(rect.right() - 20.0, rect.top() + 22.0),
+        7.0,
+        sp.accent,
+    );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

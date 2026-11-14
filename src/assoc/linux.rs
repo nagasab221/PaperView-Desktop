@@ -23,7 +23,9 @@ fn desktop_path() -> Result<PathBuf, String> {
 }
 
 fn icon_path() -> Result<PathBuf, String> {
-    Ok(data_home()?.join("icons/hicolor/256x256/apps").join(format!("{ICON_NAME}.png")))
+    Ok(data_home()?
+        .join("icons/hicolor/256x256/apps")
+        .join(format!("{ICON_NAME}.png")))
 }
 
 /// Quotes a path for a desktop entry's Exec key.
@@ -122,7 +124,9 @@ pub fn unregister() -> Result<(), String> {
 /// Best effort: lets menus and file managers notice the change straight away.
 fn refresh() {
     if let Ok(dir) = data_home() {
-        let _ = Command::new("update-desktop-database").arg(dir.join("applications")).status();
+        let _ = Command::new("update-desktop-database")
+            .arg(dir.join("applications"))
+            .status();
         let _ = Command::new("gtk-update-icon-cache")
             .args(["-f", "-t"])
             .arg(dir.join("icons/hicolor"))

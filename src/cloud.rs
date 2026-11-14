@@ -47,7 +47,12 @@ pub enum CloudEvent {
     /// Live transfer progress (downloads).
     Progress { done: u64, total: u64, bps: f64 },
     /// Terminal: file fetched to this local path.
-    Downloaded { path: PathBuf, bytes: u64, secs: f64, open: bool },
+    Downloaded {
+        path: PathBuf,
+        bytes: u64,
+        secs: f64,
+        open: bool,
+    },
     /// Terminal: upload finished.
     UploadDone { name: String, bytes: u64, secs: f64 },
     /// Terminal: files deleted.
@@ -97,7 +102,13 @@ pub fn local_path_for(name: &str) -> PathBuf {
     // We upload flat names, but sanitize anything else defensively.
     let flat: String = name
         .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     cache_dir().join(flat)
 }
@@ -134,9 +145,12 @@ pub fn spawn(cfg: B2Config, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
             CloudOp::Download(name, expected, open) => {
                 send(CloudEvent::Status("Downloading…".into()));
                 match download(&session, &name, expected, &send) {
-                    Ok((path, bytes, secs)) => {
-                        send(CloudEvent::Downloaded { path, bytes, secs, open })
-                    }
+                    Ok((path, bytes, secs)) => send(CloudEvent::Downloaded {
+                        path,
+                        bytes,
+                        secs,
+                        open,
+                    }),
                     Err(e) => send(CloudEvent::Error(e)),
                 }
             }
@@ -252,9 +266,13 @@ fn read_json<T: serde::de::DeserializeOwned>(
 }
 
 fn connect(cfg: &B2Config) -> Result<Session, String> {
-    let creds = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", cfg.key_id.trim(), cfg.app_key.trim()));
-    let mut resp = agent().get("https://api.backblazeb2.com/b2api/v2/b2_authorize_account")
+    let creds = base64::engine::general_purpose::STANDARD.encode(format!(
+        "{}:{}",
+        cfg.key_id.trim(),
+        cfg.app_key.trim()
+    ));
+    let mut resp = agent()
+        .get("https://api.backblazeb2.com/b2api/v2/b2_authorize_account")
         .header("Authorization", format!("Basic {creds}"))
         .call()
         .map_err(|e| http_err("Authorization failed (check Key ID / Application Key)", e))?;
@@ -264,9 +282,11 @@ fn connect(cfg: &B2Config) -> Result<Session, String> {
         "accountId": auth.account_id,
         "bucketName": cfg.bucket.trim(),
     });
-    let mut resp = agent().post(format!("{}/b2api/v2/b2_list_buckets", auth.api_url))
+    let mut resp = agent()
+        .post(format!("{}/b2api/v2/b2_list_buckets", auth.api_url))
         .header("Authorization", &auth.token)
-        .header("Content-Type", "application/json").send(body.to_string())
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
         .map_err(|e| http_err("Could not list buckets", e))?;
     let buckets: BucketsResp = read_json("List buckets", &mut resp)?;
     let bucket = buckets
@@ -301,9 +321,11 @@ fn list(s: &Session) -> Result<Vec<CloudFile>, String> {
         if let Some(sfn) = &start {
             body["startFileName"] = serde_json::json!(sfn);
         }
-        let mut resp = agent().post(format!("{}/b2api/v2/b2_list_file_names", s.api_url))
+        let mut resp = agent()
+            .post(format!("{}/b2api/v2/b2_list_file_names", s.api_url))
             .header("Authorization", &s.token)
-            .header("Content-Type", "application/json").send(body.to_string())
+            .header("Content-Type", "application/json")
+            .send(body.to_string())
             .map_err(|e| http_err("Could not list files", e))?;
         let listing: ListResp = read_json("List files", &mut resp)?;
         out.extend(
@@ -337,14 +359,17 @@ fn upload(s: &Session, path: &Path) -> Result<(String, u64, f64), String> {
         .ok_or("File has no name")?;
 
     let body = serde_json::json!({ "bucketId": s.bucket_id });
-    let mut resp = agent().post(format!("{}/b2api/v2/b2_get_upload_url", s.api_url))
+    let mut resp = agent()
+        .post(format!("{}/b2api/v2/b2_get_upload_url", s.api_url))
         .header("Authorization", &s.token)
-        .header("Content-Type", "application/json").send(body.to_string())
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
         .map_err(|e| http_err("Could not get upload URL", e))?;
     let up: UploadUrlResp = read_json("Get upload URL", &mut resp)?;
 
     let started = std::time::Instant::now();
-    agent().post(&up.url)
+    agent()
+        .post(&up.url)
         .header("Authorization", &up.token)
         .header("X-Bz-File-Name", percent_encode(&name, false))
         .header("Content-Type", "application/pdf")
@@ -370,7 +395,8 @@ fn download(
         s.bucket_name,
         percent_encode(name, true)
     );
-    let mut resp = agent().get(&url)
+    let mut resp = agent()
+        .get(&url)
         .header("Authorization", &s.token)
         .call()
         .map_err(|e| http_err("Download failed", e))?;
@@ -391,8 +417,7 @@ fn download(
         bytes.extend_from_slice(&buf[..n]);
         if last_emit.elapsed().as_millis() >= 150 {
             let done = bytes.len() as u64;
-            let bps =
-                (done - last_bytes) as f64 / last_emit.elapsed().as_secs_f64().max(1e-6);
+            let bps = (done - last_bytes) as f64 / last_emit.elapsed().as_secs_f64().max(1e-6);
             emit(CloudEvent::Progress {
                 done,
                 total: expected.max(done),
@@ -417,7 +442,8 @@ fn download(
 fn delete(s: &Session, items: &[(String, String)]) -> Result<usize, String> {
     for (name, id) in items {
         let body = serde_json::json!({ "fileName": name, "fileId": id });
-        agent().post(format!("{}/b2api/v2/b2_delete_file_version", s.api_url))
+        agent()
+            .post(format!("{}/b2api/v2/b2_delete_file_version", s.api_url))
             .header("Authorization", &s.token)
             .header("Content-Type", "application/json")
             .send(body.to_string())
@@ -511,7 +537,10 @@ mod tests {
 
     #[test]
     fn percent_encoding() {
-        assert_eq!(percent_encode("plain-name_1.pdf", false), "plain-name_1.pdf");
+        assert_eq!(
+            percent_encode("plain-name_1.pdf", false),
+            "plain-name_1.pdf"
+        );
         assert_eq!(percent_encode("a b.pdf", false), "a%20b.pdf");
         assert_eq!(percent_encode("a/b.pdf", true), "a/b.pdf");
         assert_eq!(percent_encode("a/b.pdf", false), "a%2Fb.pdf");
@@ -567,13 +596,22 @@ mod fake {
             CloudOp::Upload(path) => {
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
                 let n = std::fs::copy(&path, dir.join(&name)).unwrap_or(0);
-                send(CloudEvent::UploadDone { name, bytes: n, secs: 0.1 })
+                send(CloudEvent::UploadDone {
+                    name,
+                    bytes: n,
+                    secs: 0.1,
+                })
             }
             CloudOp::Download(name, _, open) => {
                 let dest = local_path_for(&name);
                 let _ = std::fs::create_dir_all(cache_dir());
                 match std::fs::copy(dir.join(&name), &dest) {
-                    Ok(n) => send(CloudEvent::Downloaded { path: dest, bytes: n, secs: 0.1, open }),
+                    Ok(n) => send(CloudEvent::Downloaded {
+                        path: dest,
+                        bytes: n,
+                        secs: 0.1,
+                        open,
+                    }),
                     Err(e) => send(CloudEvent::Error(format!("fake download: {e}"))),
                 }
             }

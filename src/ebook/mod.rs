@@ -29,10 +29,17 @@ pub struct Run {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    Heading { level: u8, runs: Vec<Run> },
-    Para { runs: Vec<Run> },
+    Heading {
+        level: u8,
+        runs: Vec<Run>,
+    },
+    Para {
+        runs: Vec<Run>,
+    },
     /// Index into [`Content::Text`]'s images.
-    Image { id: usize },
+    Image {
+        id: usize,
+    },
     PageBreak,
     Rule,
 }
@@ -57,7 +64,10 @@ pub struct Chapter {
 
 pub enum Content {
     /// Reflowable text, laid out into pages by the reader.
-    Text { blocks: Vec<Block>, images: Vec<Vec<u8>> },
+    Text {
+        blocks: Vec<Block>,
+        images: Vec<Vec<u8>>,
+    },
     /// One image per page (comics). Read on demand from the archive.
     Comic { pages: Vec<String> },
 }
@@ -94,7 +104,9 @@ fn kind(path: &Path) -> String {
     if name.ends_with(".fb2.zip") {
         return "fbz".into();
     }
-    path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// Reads a whole book. Slow for big ones: call it off the UI thread.
@@ -140,7 +152,9 @@ pub fn comic_page(path: &Path, name: &str) -> Option<Vec<u8>> {
 
 /// When a book has no table of contents, its headings make one.
 fn chapters_from_headings(content: &Content) -> Vec<Chapter> {
-    let Content::Text { blocks, .. } = content else { return Vec::new() };
+    let Content::Text { blocks, .. } = content else {
+        return Vec::new();
+    };
     blocks
         .iter()
         .enumerate()
@@ -158,8 +172,9 @@ fn chapters_from_headings(content: &Content) -> Vec<Chapter> {
 /// Windows-1252 bytes to text (old Kindle books and stray files).
 pub(crate) fn decode_cp1252(bytes: &[u8]) -> String {
     const HIGH: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
-        '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
     ];
     bytes
         .iter()
@@ -212,7 +227,15 @@ mod tests {
 
     #[test]
     fn recognises_book_files() {
-        for name in ["a.epub", "B.MOBI", "c.azw3", "d.fb2", "e.fb2.zip", "f.cbz", "g.txt"] {
+        for name in [
+            "a.epub",
+            "B.MOBI",
+            "c.azw3",
+            "d.fb2",
+            "e.fb2.zip",
+            "f.cbz",
+            "g.txt",
+        ] {
             assert!(is_ebook(Path::new(name)), "{name}");
         }
         assert!(!is_ebook(Path::new("x.pdf")));

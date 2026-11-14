@@ -68,7 +68,11 @@ enum ScrollTarget {
     /// Absolute scroll offset (tab-switch restore).
     Offset(egui::Vec2),
     /// A peek spot: a point a fraction of the way down a page.
-    Spot { page: i32, y_frac: f32, x_frac: f32 },
+    Spot {
+        page: i32,
+        y_frac: f32,
+        x_frac: f32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -108,6 +112,17 @@ struct Tab {
     state: Option<Box<DocTab>>,
     /// A book's reader, parked while its tab is inactive.
     book: Option<Box<reader::BookView>>,
+}
+
+/// Same file? Windows paths ignore case; everywhere else two paths that
+/// differ only in case are different files.
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    } else {
+        a == b
+    }
 }
 
 fn truncate_title(s: &str) -> String {
@@ -240,7 +255,11 @@ fn fmt_ts(ts: i64) -> String {
 
 fn fmt_time(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
-        .map(|utc| utc.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
@@ -500,10 +519,7 @@ pub struct ViewerApp {
 }
 
 impl ViewerApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        initial_file: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial_file: Option<PathBuf>) -> Self {
         // Ctrl+= / Ctrl+- should zoom the *document*, not the whole UI.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
@@ -648,8 +664,9 @@ impl ViewerApp {
                 .unwrap_or(1.0)
                 .clamp(density::SCALE_MIN, density::SCALE_MAX);
             app.ui_scale_draft = app.ui_scale;
-            app.library_layout =
-                density::LibraryLayout::from_key(&storage.get_string("library_layout").unwrap_or_default());
+            app.library_layout = density::LibraryLayout::from_key(
+                &storage.get_string("library_layout").unwrap_or_default(),
+            );
             if let Some(raw) = storage.get_string("books") {
                 app.books = books::decode(&raw);
             }
@@ -688,7 +705,9 @@ impl ViewerApp {
         }
         // Scripted UI tests skip the first-launch question unless testing it.
         #[cfg(debug_assertions)]
-        if std::env::var_os("PAPERVIEW_AUTOMATE").is_some() && std::env::var_os("PAPERVIEW_FIRST_RUN").is_none() {
+        if std::env::var_os("PAPERVIEW_AUTOMATE").is_some()
+            && std::env::var_os("PAPERVIEW_FIRST_RUN").is_none()
+        {
             app.default_asked = true;
         }
         app.b2_draft = app.cloud_cfg.clone();
@@ -723,7 +742,12 @@ impl ViewerApp {
             let restore: Vec<PathBuf> = cc
                 .storage
                 .and_then(|s| s.get_string("open_tabs"))
-                .map(|s| s.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
+                .map(|s| {
+                    s.lines()
+                        .filter(|l| !l.is_empty())
+                        .map(PathBuf::from)
+                        .collect()
+                })
                 .unwrap_or_default();
             for path in restore.iter().take(8).filter(|p| p.exists()) {
                 app.try_open(&cc.egui_ctx, path, None, true);
@@ -743,13 +767,8 @@ impl ViewerApp {
             return;
         }
         // Already open in a tab? Just switch to it.
-        let dedupe_key = path.to_string_lossy().to_string();
         if password.is_none() {
-            if let Some(i) = self
-                .tabs
-                .iter()
-                .position(|t| t.path.to_string_lossy().eq_ignore_ascii_case(&dedupe_key))
-            {
+            if let Some(i) = self.tabs.iter().position(|t| same_path(&t.path, path)) {
                 self.activate_tab(ctx, i);
                 return;
             }
@@ -767,9 +786,7 @@ impl ViewerApp {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{name} — PaperView"
-                )));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — PaperView")));
                 // Park the outgoing tab, then install this document as a
                 // new tab whose state lives inline.
                 self.stash_active_tab();
@@ -793,11 +810,10 @@ impl ViewerApp {
                 self.password_prompt = None;
                 self.status = None;
                 // Restore this file's remembered state (Sumatra-style).
-                let key = path.to_string_lossy().to_string();
                 let remembered = self
                     .recents
                     .iter()
-                    .find(|r| r.path.to_string_lossy().eq_ignore_ascii_case(&key))
+                    .find(|r| same_path(&r.path, path))
                     .map(|r| (r.page, r.zoom, r.rotation));
                 // Unknown files start at the default zoom (fit page).
                 let (page, zoom, rotation) = remembered.unwrap_or((0, Zoom::FitPage, 0));
@@ -808,8 +824,7 @@ impl ViewerApp {
                 self.doc_password = password.map(|s| s.to_string());
                 if !quiet {
                     // Bump the recents list, carrying the state forward.
-                    self.recents
-                        .retain(|r| !r.path.to_string_lossy().eq_ignore_ascii_case(&key));
+                    self.recents.retain(|r| !same_path(&r.path, path));
                     self.recents.insert(
                         0,
                         Recent {
@@ -861,8 +876,7 @@ impl ViewerApp {
 
     /// Writes the open document's page/zoom/rotation into its recents entry.
     fn stash_doc_state(&mut self) {
-        let Some(path) = self.doc.as_ref().map(|d| d.path.to_string_lossy().to_string())
-        else {
+        let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) else {
             return;
         };
         let (page, zoom) = self
@@ -871,11 +885,7 @@ impl ViewerApp {
             .map(|(p, z, _)| (p, z))
             .unwrap_or((self.page_index, self.zoom));
         let rotation = self.rotation;
-        if let Some(r) = self
-            .recents
-            .iter_mut()
-            .find(|r| r.path.to_string_lossy().eq_ignore_ascii_case(&path))
-        {
+        if let Some(r) = self.recents.iter_mut().find(|r| same_path(&r.path, &path)) {
             r.page = page;
             r.zoom = zoom;
             r.rotation = rotation;
@@ -1470,7 +1480,11 @@ impl ViewerApp {
         if let Some(rects) = self.sel_rects.get(&page) {
             return Some(rects.clone());
         }
-        let rects = self.doc.as_ref()?.range_rects(page, range.0, range.1).ok()?;
+        let rects = self
+            .doc
+            .as_ref()?
+            .range_rects(page, range.0, range.1)
+            .ok()?;
         self.sel_rects.insert(page, rects.clone());
         Some(rects)
     }
@@ -1649,10 +1663,7 @@ impl ViewerApp {
         let ctx = ui.ctx().clone();
         resp.context_menu(|ui| {
             let have = self.selection.is_some();
-            if ui
-                .add_enabled(have, egui::Button::new("Copy"))
-                .clicked()
-            {
+            if ui.add_enabled(have, egui::Button::new("Copy")).clicked() {
                 self.copy_selection(&ctx);
                 ui.close();
             }
@@ -1796,14 +1807,21 @@ impl ViewerApp {
             copy: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
             select_all: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
             save_as: i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
-                || i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S),
+                || i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::S,
+                ),
             print: i.consume_key(egui::Modifiers::COMMAND, egui::Key::P),
             close_tab: i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
             tab_next: i.consume_key(egui::Modifiers::COMMAND, egui::Key::Tab),
-            tab_prev: i
-                .consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Tab),
-            reopen_closed: i
-                .consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::T),
+            tab_prev: i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Tab,
+            ),
+            reopen_closed: i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::T,
+            ),
             wheel_y: if i.modifiers.ctrl {
                 0.0
             } else {
@@ -1986,7 +2004,11 @@ impl ViewerApp {
                 let mut tops = Vec::with_capacity(sizes.len());
                 let mut y = gap;
                 for &(w_pt, h_pt) in sizes.iter() {
-                    let (dw, dh) = if rot % 2 == 1 { (h_pt, w_pt) } else { (w_pt, h_pt) };
+                    let (dw, dh) = if rot % 2 == 1 {
+                        (h_pt, w_pt)
+                    } else {
+                        (w_pt, h_pt)
+                    };
                     let h = THUMB_W * dh / dw.max(1.0);
                     tops.push((y, h));
                     y += h + gap + 16.0; // room for the page-number caption
@@ -2031,10 +2053,8 @@ impl ViewerApp {
                             ) {
                                 Ok((id, tsize)) => {
                                     // Same pixel-grid snap as the main view.
-                                    let min =
-                                        ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
-                                    let snapped =
-                                        egui::Rect::from_min_size(min, tsize / ppp);
+                                    let min = ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
+                                    let snapped = egui::Rect::from_min_size(min, tsize / ppp);
                                     ui.painter().image(
                                         id,
                                         snapped,
@@ -2136,8 +2156,7 @@ impl ViewerApp {
                                     Some(page) => {
                                         let current = page == self.page_index;
                                         let text = egui::RichText::new(&entry.title).size(13.0);
-                                        let text =
-                                            if current { text.strong() } else { text };
+                                        let text = if current { text.strong() } else { text };
                                         if ui
                                             .add(egui::Button::new(text).frame(false))
                                             .on_hover_text(format!("Page {}", page + 1))
@@ -2169,7 +2188,11 @@ impl ViewerApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         // Pages sit on the skin's viewport tone; the home view on its paper.
-        let canvas = if self.doc.is_none() && self.book.is_none() { p.background } else { p.viewport };
+        let canvas = if self.doc.is_none() && self.book.is_none() {
+            p.background
+        } else {
+            p.viewport
+        };
         let frame = egui::Frame::NONE.fill(canvas);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if let Some(msg) = &self.engine_error {
@@ -2205,7 +2228,11 @@ impl ViewerApp {
     /// Page size in points as *displayed* (swapped when rotated 90/270 deg).
     fn display_size(&self, page: i32) -> (f32, f32) {
         let (w, h) = self.page_sizes[page as usize];
-        if self.rotation % 2 == 1 { (h, w) } else { (w, h) }
+        if self.rotation % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        }
     }
 
     fn resolve_zoom(&mut self, avail: egui::Vec2) -> f32 {
@@ -2217,9 +2244,7 @@ impl ViewerApp {
         let (w_pt, h_pt) = self.display_size(idx);
         let zoom = match self.zoom {
             Zoom::Custom(z) => z,
-            Zoom::FitWidth => {
-                (avail.x - PAGE_GAP * 2.0).max(64.0) / (w_pt * PX_PER_PT)
-            }
+            Zoom::FitWidth => (avail.x - PAGE_GAP * 2.0).max(64.0) / (w_pt * PX_PER_PT),
             Zoom::FitPage => {
                 let zw = (avail.x - PAGE_GAP * 2.0).max(64.0) / (w_pt * PX_PER_PT);
                 let zh = (avail.y - PAGE_GAP * 2.0).max(64.0) / (h_pt * PX_PER_PT);
@@ -2233,7 +2258,12 @@ impl ViewerApp {
 
     /// Builds the scroll area, applying any pending jump or zoom-anchor
     /// offset adjustment.
-    fn scrolled(&mut self, layout: &Layout, avail: egui::Vec2, continuous: bool) -> egui::ScrollArea {
+    fn scrolled(
+        &mut self,
+        layout: &Layout,
+        avail: egui::Vec2,
+        continuous: bool,
+    ) -> egui::ScrollArea {
         let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]);
 
         let rect_for = |page: i32| -> egui::Rect {
@@ -2251,7 +2281,11 @@ impl ViewerApp {
                 ScrollTarget::PageBottom(p) => {
                     ((rect_for(p).max.y + PAGE_GAP - avail.y).max(0.0), None)
                 }
-                ScrollTarget::Spot { page, y_frac, x_frac } => {
+                ScrollTarget::Spot {
+                    page,
+                    y_frac,
+                    x_frac,
+                } => {
                     let r = rect_for(page);
                     (
                         (r.min.y + y_frac * r.height()).max(0.0),
@@ -2370,8 +2404,8 @@ impl ViewerApp {
             if gesture {
                 return true;
             }
-            let wanted = ((rects[p as usize].width() * ppp).round() as i32)
-                .clamp(16, MAX_TEXTURE_DIM);
+            let wanted =
+                ((rects[p as usize].width() * ppp).round() as i32).clamp(16, MAX_TEXTURE_DIM);
             px == wanted
         });
     }
@@ -2381,7 +2415,9 @@ impl ViewerApp {
         let ppp = ctx.pixels_per_point();
         let avail = ui.available_size();
         let zoom = self.resolve_zoom(avail);
-        let page = self.page_index.clamp(0, self.page_count().saturating_sub(1).max(0));
+        let page = self
+            .page_index
+            .clamp(0, self.page_count().saturating_sub(1).max(0));
         let size_pt = self.display_size(page);
         let layout = view::layout_single(size_pt, zoom, avail);
         let scroll = self
@@ -2402,8 +2438,7 @@ impl ViewerApp {
 
         // Sumatra-style: wheeling past the bottom (or top) flips the page.
         let count = self.page_count();
-        let at_bottom =
-            out.state.offset.y + out.inner_rect.height() >= out.content_size.y - 2.0;
+        let at_bottom = out.state.offset.y + out.inner_rect.height() >= out.content_size.y - 2.0;
         let at_top = out.state.offset.y <= 2.0;
         self.last_at_bottom = at_bottom;
         self.last_at_top = at_top;
@@ -2423,9 +2458,8 @@ impl ViewerApp {
         let gesture = self.zoom_gesture_active();
         let wanted = ((layout.rects[0].width() * ppp).round() as i32).clamp(16, MAX_TEXTURE_DIM);
         let rot_now = self.rotation % 4;
-        self.cache.retain(|p, px, r| {
-            (p - page).abs() <= 1 && r == rot_now && (gesture || px == wanted)
-        });
+        self.cache
+            .retain(|p, px, r| (p - page).abs() <= 1 && r == rot_now && (gesture || px == wanted));
     }
 
     fn paint_page(&mut self, ui: &mut egui::Ui, page: i32, rect: egui::Rect, ppp: f32) {
@@ -2600,7 +2634,10 @@ impl eframe::App for ViewerApp {
                     PrintEvent::Status(s) => self.toast = Some((s, Instant::now())),
                     PrintEvent::Done(pages) => {
                         self.toast = Some((
-                            format!("Sent {pages} page{} to the printer", if pages == 1 { "" } else { "s" }),
+                            format!(
+                                "Sent {pages} page{} to the printer",
+                                if pages == 1 { "" } else { "s" }
+                            ),
                             Instant::now(),
                         ));
                         self.printing = false;
@@ -2637,12 +2674,16 @@ impl eframe::App for ViewerApp {
                     CloudEvent::Progress { done, total, bps } => {
                         self.cloud_progress = Some((done, total, bps));
                     }
-                    CloudEvent::Downloaded { path, bytes, secs, open } => {
+                    CloudEvent::Downloaded {
+                        path,
+                        bytes,
+                        secs,
+                        open,
+                    } => {
                         self.cloud_busy = false;
                         self.cloud_status = None;
                         self.cloud_progress = None;
-                        self.cloud_last_dl =
-                            Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                        self.cloud_last_dl = Some((bytes as f64 / secs.max(1e-3), now_ts()));
                         refresh_local = true;
                         if open {
                             open_after = Some(path);
@@ -2652,8 +2693,7 @@ impl eframe::App for ViewerApp {
                         self.cloud_busy = false;
                         self.cloud_status = Some(format!("Uploaded {name}"));
                         self.cloud_progress = None;
-                        self.cloud_last_ul =
-                            Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                        self.cloud_last_ul = Some((bytes as f64 / secs.max(1e-3), now_ts()));
                         // Refresh once the whole queue is done.
                         relist = self.cloud_queue.is_empty();
                     }
@@ -2661,7 +2701,10 @@ impl eframe::App for ViewerApp {
                         self.cloud_busy = false;
                         self.cloud_status = None;
                         self.toast = Some((
-                            format!("Deleted {n} file{} from your bucket", if n == 1 { "" } else { "s" }),
+                            format!(
+                                "Deleted {n} file{} from your bucket",
+                                if n == 1 { "" } else { "s" }
+                            ),
                             Instant::now(),
                         ));
                         self.cloud_selected.clear();
@@ -2674,7 +2717,11 @@ impl eframe::App for ViewerApp {
                         // A Recents entry for the downloaded copy follows it.
                         let (old_local, new_local) =
                             (cloud::local_path_for(&from), cloud::local_path_for(&to));
-                        for r in self.recents.iter_mut().filter(|r| r.path == old_local) {
+                        for r in self
+                            .recents
+                            .iter_mut()
+                            .filter(|r| same_path(&r.path, &old_local))
+                        {
                             r.path = new_local.clone();
                         }
                         if let Some(spot) = self.peek.spots.remove(&old_local) {
@@ -2766,14 +2813,23 @@ impl eframe::App for ViewerApp {
         );
         storage.set_string("theme", self.theme.key().to_string());
         storage.set_string("skin", self.skin.key().to_string());
-        storage.set_string("cloud_enabled", if self.cloud_enabled { "1" } else { "0" }.to_string());
+        storage.set_string(
+            "cloud_enabled",
+            if self.cloud_enabled { "1" } else { "0" }.to_string(),
+        );
         storage.set_string("peek_spots", peek::encode_spots(&self.peek.spots));
         storage.set_string("peek_tips", self.peek.tips_shown.to_string());
         storage.set_string("folders", folders::encode(&self.folders));
         self.save_book_progress();
         storage.set_string("books", books::encode(&self.books));
-        storage.set_string("book_spread", if self.book_spread { "1" } else { "0" }.to_string());
-        storage.set_string("default_asked", if self.default_asked { "1" } else { "0" }.to_string());
+        storage.set_string(
+            "book_spread",
+            if self.book_spread { "1" } else { "0" }.to_string(),
+        );
+        storage.set_string(
+            "default_asked",
+            if self.default_asked { "1" } else { "0" }.to_string(),
+        );
         storage.set_string("book_font", format!("{:.1}", self.book_font));
         storage.set_string("ui_scale", format!("{:.2}", self.ui_scale));
         storage.set_string("library_layout", self.library_layout.key().to_string());
@@ -2782,7 +2838,10 @@ impl eframe::App for ViewerApp {
         storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());
         storage.set_string("b2_app_key", self.cloud_cfg.app_key.clone());
         storage.set_string("b2_bucket", self.cloud_cfg.bucket.clone());
-        storage.set_string("auto_save", if self.auto_save { "1" } else { "0" }.to_string());
+        storage.set_string(
+            "auto_save",
+            if self.auto_save { "1" } else { "0" }.to_string(),
+        );
         storage.set_string("auto_save_mb", self.auto_save_mb.to_string());
         storage.set_string(
             "open_tabs",
@@ -2798,6 +2857,14 @@ impl eframe::App for ViewerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_path_case() {
+        let a = Path::new("/home/me/Study/Notes.pdf");
+        assert!(same_path(a, Path::new("/home/me/Study/Notes.pdf")));
+        // Only Windows treats these as one file.
+        assert_eq!(same_path(a, Path::new("/home/me/study/notes.pdf")), cfg!(windows));
+    }
 
     #[test]
     fn recents_roundtrip() {
@@ -2905,4 +2972,3 @@ mod tests {
         assert_eq!(decode_recents("123\tC:\\ok.pdf").len(), 1);
     }
 }
-

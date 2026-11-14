@@ -30,7 +30,10 @@ fn first_fb2_in_zip(path: &Path) -> Result<Vec<u8>, String> {
         .find(|n| n.to_ascii_lowercase().ends_with(".fb2"))
         .ok_or("There's no .fb2 file inside this archive")?;
     let mut buf = Vec::new();
-    zip.by_name(&name).map_err(|e| e.to_string())?.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    zip.by_name(&name)
+        .map_err(|e| e.to_string())?
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
     Ok(buf)
 }
 
@@ -49,7 +52,10 @@ fn binaries(tokens: &[Token]) -> HashMap<String, Vec<u8>> {
     for t in tokens {
         match t {
             Token::Start { name, attrs, .. } if name == "binary" => {
-                current = attrs.iter().find(|(k, _)| k == "id").map(|(_, v)| v.clone());
+                current = attrs
+                    .iter()
+                    .find(|(k, _)| k == "id")
+                    .map(|(_, v)| v.clone());
             }
             Token::Text(text) if current.is_some() => {
                 let clean: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -66,7 +72,8 @@ fn binaries(tokens: &[Token]) -> HashMap<String, Vec<u8>> {
 
 /// Book title, author and the cover's binary id from `<title-info>`.
 fn description(tokens: &[Token]) -> (String, Option<String>, Option<String>) {
-    let (mut title, mut first, mut last, mut cover) = (String::new(), String::new(), String::new(), None);
+    let (mut title, mut first, mut last, mut cover) =
+        (String::new(), String::new(), String::new(), None);
     let mut in_title_info = false;
     let mut field: Option<String> = None;
     let mut author_done = false;
@@ -74,7 +81,9 @@ fn description(tokens: &[Token]) -> (String, Option<String>, Option<String>) {
         match t {
             Token::Start { name, attrs, .. } => match name.as_str() {
                 "title-info" => in_title_info = true,
-                "book-title" | "first-name" | "last-name" if in_title_info => field = Some(name.clone()),
+                "book-title" | "first-name" | "last-name" if in_title_info => {
+                    field = Some(name.clone())
+                }
                 "image" if in_title_info => {
                     cover = attrs
                         .iter()
@@ -125,7 +134,12 @@ fn parse(src: &str) -> Result<Book, String> {
     if blocks.is_empty() {
         return Err("Couldn't find any text in this FB2 book".into());
     }
-    Ok(Book { title, author, content: Content::Text { blocks, images }, chapters: Vec::new() })
+    Ok(Book {
+        title,
+        author,
+        content: Content::Text { blocks, images },
+        chapters: Vec::new(),
+    })
 }
 
 fn cover_of(src: &str) -> Option<Vec<u8>> {
@@ -159,7 +173,9 @@ mod tests {
         let book = parse(&src).unwrap();
         assert_eq!(book.title, "Kreutzer");
         assert_eq!(book.author.as_deref(), Some("Leo Tolstoy"));
-        let Content::Text { blocks, images } = &book.content else { panic!() };
+        let Content::Text { blocks, images } = &book.content else {
+            panic!()
+        };
         assert_eq!(blocks.len(), 3);
         assert_eq!(images, &vec![b"\x89PNGfake".to_vec()]);
         assert_eq!(cover_of(&src).as_deref(), Some(&b"\x89PNGfake"[..]));

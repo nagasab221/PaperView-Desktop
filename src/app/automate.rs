@@ -53,7 +53,11 @@ impl Script {
     pub fn from_env() -> Option<Script> {
         let raw = std::env::var("PAPERVIEW_AUTOMATE").ok()?;
         Some(Script {
-            steps: raw.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            steps: raw
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             next: 0,
             wait_until: Some(Instant::now() + Duration::from_millis(800)),
             awaiting_shot: None,
@@ -99,7 +103,9 @@ fn save_ppm(path: &std::path::Path, image: &egui::ColorImage) -> std::io::Result
 
 impl ViewerApp {
     pub(super) fn automate(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        let Some(mut s) = self.automation.take() else { return };
+        let Some(mut s) = self.automation.take() else {
+            return;
+        };
         ctx.request_repaint();
         if let Some(times) = &mut s.perf {
             times.push(ctx.input(|i| i.unstable_dt));
@@ -126,7 +132,12 @@ impl ViewerApp {
             let step = s.steps[s.next].clone();
             s.next += 1;
             let parts: Vec<&str> = step.split_whitespace().collect();
-            let num = |i: usize| parts.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let num = |i: usize| {
+                parts
+                    .get(i)
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0)
+            };
             match parts.first().copied() {
                 Some("wait") => {
                     s.wait_until = Some(Instant::now() + Duration::from_millis(num(1) as u64));
@@ -171,8 +182,11 @@ impl ViewerApp {
                     let pos = Pos2::new(num(1), num(2));
                     s.pointer = pos;
                     raw.events.push(Event::PointerMoved(pos));
-                    let button =
-                        if op == "rclick" { PointerButton::Secondary } else { PointerButton::Primary };
+                    let button = if op == "rclick" {
+                        PointerButton::Secondary
+                    } else {
+                        PointerButton::Primary
+                    };
                     let mut push = |pressed| {
                         raw.events.push(Event::PointerButton {
                             pos,
@@ -205,7 +219,11 @@ impl ViewerApp {
                     break;
                 }
                 Some("type") => {
-                    let text = step.split_once(' ').map(|(_, t)| t).unwrap_or("").to_string();
+                    let text = step
+                        .split_once(' ')
+                        .map(|(_, t)| t)
+                        .unwrap_or("")
+                        .to_string();
                     raw.events.push(Event::Text(text));
                     s.wait_until = Some(Instant::now() + Duration::from_millis(80));
                     break;
@@ -257,7 +275,9 @@ impl ViewerApp {
                         let v = i.viewport();
                         (v.maximized, v.minimized, v.inner_rect)
                     });
-                    eprintln!("automate: window maximized={max:?} minimized={min:?} inner={rect:?}");
+                    eprintln!(
+                        "automate: window maximized={max:?} minimized={min:?} inner={rect:?}"
+                    );
                 }
                 Some("zoom") => {
                     eprintln!(

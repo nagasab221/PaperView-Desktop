@@ -62,7 +62,10 @@ fn renders_fixture_pages() {
     let total = page.width * page.height;
     assert!(white > total / 2, "mostly white page, got {white}/{total}");
     assert!(dark > 500, "text pixels expected, got {dark}");
-    assert!(red > 5_000, "red rectangle expected, got {red} (channel swap?)");
+    assert!(
+        red > 5_000,
+        "red rectangle expected, got {red} (channel swap?)"
+    );
 
     // Last page renders too (bounds are respected).
     let last = doc.render_page(2, 300, 0).expect("page 3 should render");
@@ -71,7 +74,10 @@ fn renders_fixture_pages() {
     // Rotation: 90 deg swaps the aspect — the FINAL image is 300 wide and
     // correspondingly short (US Letter sideways: 300 * 612/792 ≈ 232).
     let rotated = doc.render_page(0, 300, 1).expect("rotated render");
-    assert_eq!(rotated.width, 300, "target width applies to the final image");
+    assert_eq!(
+        rotated.width, 300,
+        "target width applies to the final image"
+    );
     assert!(
         (220..=245).contains(&rotated.height),
         "rotated height {} (expected ≈232)",
@@ -160,7 +166,6 @@ fn text_selection_geometry() {
     assert!(no_snap.is_none());
 }
 
-
 #[test]
 fn cropbox_pages_use_displayed_coordinates() {
     let _serial = serial();
@@ -196,7 +201,6 @@ fn cropbox_pages_use_displayed_coordinates() {
     let hr = hits[0].rects[0];
     assert!((hr.x - r.x).abs() < 2.0 && (hr.y - r.y).abs() < 2.0);
 }
-
 
 #[test]
 fn outline_and_links() {

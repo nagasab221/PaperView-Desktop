@@ -8,8 +8,8 @@ use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
 use super::density::LibraryLayout;
 use super::{
-    folders, fmt_speed, fmt_time, fmt_ts, open_file_location, CloudOp, HomeScreen, LandingTab,
-    ViewerApp, FREE_TIER_BYTES,
+    fmt_speed, fmt_time, fmt_ts, folders, open_file_location, same_path, CloudOp, HomeScreen,
+    LandingTab, ViewerApp, FREE_TIER_BYTES,
 };
 use crate::cloud;
 use crate::covers::Cover;
@@ -35,7 +35,10 @@ fn cover_uv(tex_size: [usize; 2], aspect: f32) -> egui::Rect {
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, tex_aspect / aspect))
     } else {
         let f = aspect / tex_aspect;
-        egui::Rect::from_min_max(egui::pos2((1.0 - f) * 0.5, 0.0), egui::pos2((1.0 + f) * 0.5, 1.0))
+        egui::Rect::from_min_max(
+            egui::pos2((1.0 - f) * 0.5, 0.0),
+            egui::pos2((1.0 + f) * 0.5, 1.0),
+        )
     }
 }
 
@@ -62,7 +65,11 @@ fn fmt_date(ts: i64) -> String {
             .entry(hour)
             .or_insert_with(|| {
                 chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|utc| utc.with_timezone(&chrono::Local).format("%-d %b %Y").to_string())
+                    .map(|utc| {
+                        utc.with_timezone(&chrono::Local)
+                            .format("%-d %b %Y")
+                            .to_string()
+                    })
                     .unwrap_or_default()
             })
             .clone()
@@ -70,7 +77,9 @@ fn fmt_date(ts: i64) -> String {
 }
 
 fn unix(t: std::time::SystemTime) -> i64 {
-    t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A document already downloaded from the bucket.
@@ -93,7 +102,11 @@ pub(super) fn read_local_docs() -> Vec<LocalDoc> {
                     }
                     let name = e.file_name().to_string_lossy().into_owned();
                     Some((
-                        LocalDoc { path: e.path(), name, size: meta.len() },
+                        LocalDoc {
+                            path: e.path(),
+                            name,
+                            size: meta.len(),
+                        },
                         meta.modified().unwrap_or(std::time::UNIX_EPOCH),
                     ))
                 })
@@ -173,7 +186,8 @@ impl ViewerApp {
                 )
             }
             LandingTab::Recent if self.recents.is_empty() => {
-                "Open a PDF with Ctrl+O, or drop a PDF or a folder anywhere in this window".to_string()
+                "Open a PDF with Ctrl+O, or drop a PDF or a folder anywhere in this window"
+                    .to_string()
             }
             LandingTab::Recent => {
                 let n = self.recents.len();
@@ -188,7 +202,10 @@ impl ViewerApp {
             if w::icon_button(ui, "⚙", "Settings (Ctrl+,)", false).clicked() {
                 settings = true;
             }
-            if w::primary_button(ui, "Open a PDF", true).on_hover_text("Ctrl+O").clicked() {
+            if w::primary_button(ui, "Open a PDF", true)
+                .on_hover_text("Ctrl+O")
+                .clicked()
+            {
                 open = true;
             }
             if w::outlined_button(ui, "Add folder", true)
@@ -212,7 +229,10 @@ impl ViewerApp {
         if tabs.len() > 1 {
             ui.add_space(14.0);
             let labels: Vec<&str> = tabs.iter().map(|(l, _)| *l).collect();
-            let sel = tabs.iter().position(|(_, t)| *t == self.landing_tab).unwrap_or(0);
+            let sel = tabs
+                .iter()
+                .position(|(_, t)| *t == self.landing_tab)
+                .unwrap_or(0);
             if let Some(i) = w::text_tabs(ui, &labels, sel) {
                 self.landing_tab = tabs[i].1;
                 if self.landing_tab == LandingTab::Folders {
@@ -257,7 +277,11 @@ impl ViewerApp {
         let tiles: Vec<Tile> = self
             .recents
             .iter()
-            .map(|r| Tile { path: r.path.clone(), when: r.ts, removable: true })
+            .map(|r| Tile {
+                path: r.path.clone(),
+                when: r.ts,
+                removable: true,
+            })
             .collect();
         let (open, remove) = self.shelf(ui, ctx, &tiles);
         if let Some(i) = remove {
@@ -284,7 +308,11 @@ impl ViewerApp {
         let tiles: Vec<Tile> = self
             .books
             .iter()
-            .map(|b| Tile { path: b.path.clone(), when: b.ts, removable: true })
+            .map(|b| Tile {
+                path: b.path.clone(),
+                when: b.ts,
+                removable: true,
+            })
             .collect();
         let (open, remove) = self.shelf(ui, ctx, &tiles);
         if let Some(i) = remove {
@@ -302,7 +330,10 @@ impl ViewerApp {
     fn folders_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let p = w::pal(ui);
         // Folders change behind our back; re-read them now and then while shown.
-        if self.folders_scanned.is_none_or(|t| t.elapsed() >= folders::RESCAN_EVERY) {
+        if self
+            .folders_scanned
+            .is_none_or(|t| t.elapsed() >= folders::RESCAN_EVERY)
+        {
             self.rescan_folders();
         }
         ctx.request_repaint_after(folders::RESCAN_EVERY);
@@ -338,12 +369,18 @@ impl ViewerApp {
                     refresh = true;
                 }
             });
-            ui.label(RichText::new(root.display().to_string()).small().color(p.muted));
+            ui.label(
+                RichText::new(root.display().to_string())
+                    .small()
+                    .color(p.muted),
+            );
             if listing.missing {
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("This folder can't be found. Was it moved, or is its drive unplugged?")
-                        .color(ui.visuals().error_fg_color),
+                    RichText::new(
+                        "This folder can't be found. Was it moved, or is its drive unplugged?",
+                    )
+                    .color(ui.visuals().error_fg_color),
                 );
                 continue;
             }
@@ -377,7 +414,11 @@ impl ViewerApp {
                 ui.add_space(14.0);
                 let tiles: Vec<Tile> = listing.docs[start..end]
                     .iter()
-                    .map(|d| Tile { path: d.path.clone(), when: unix(d.modified), removable: false })
+                    .map(|d| Tile {
+                        path: d.path.clone(),
+                        when: unix(d.modified),
+                        removable: false,
+                    })
                     .collect();
                 if let (Some(path), _) = self.shelf(ui, ctx, &tiles) {
                     open = Some(path);
@@ -386,7 +427,9 @@ impl ViewerApp {
             }
             if listing.truncated {
                 ui.label(
-                    RichText::new("Only the first 3000 PDFs are shown.").small().color(p.muted),
+                    RichText::new("Only the first 3000 PDFs are shown.")
+                        .small()
+                        .color(p.muted),
                 );
             }
         }
@@ -422,7 +465,7 @@ impl ViewerApp {
         if !exists {
             return "File moved or deleted".to_string();
         }
-        if let Some(b) = self.books.iter().find(|b| b.path == tile.path) {
+        if let Some(b) = self.books.iter().find(|b| same_path(&b.path, &tile.path)) {
             let progress = if b.progress > 0.005 {
                 format!("{:.0}%", (b.progress * 100.0).max(1.0))
             } else {
@@ -433,7 +476,7 @@ impl ViewerApp {
                 None => progress,
             };
         }
-        match self.recents.iter().find(|r| r.path == tile.path) {
+        match self.recents.iter().find(|r| same_path(&r.path, &tile.path)) {
             Some(r) => format!("page {} · {}", r.page + 1, fmt_date(r.ts)),
             None => fmt_date(tile.when),
         }
@@ -510,7 +553,10 @@ impl ViewerApp {
         let clip = ui.clip_rect();
         let near = clip.expand2(egui::vec2(0.0, clip.height()));
         for (i, tile) in tiles.iter().enumerate() {
-            let probe = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), LIST_ROW_H));
+            let probe = egui::Rect::from_min_size(
+                ui.cursor().min,
+                egui::vec2(ui.available_width(), LIST_ROW_H),
+            );
             if !ui.is_rect_visible(probe) {
                 if near.intersects(probe) {
                     self.covers.warm(ctx, &tile.path);
@@ -525,33 +571,49 @@ impl ViewerApp {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
             let meta = self.caption(tile, exists);
-            let (resp, thumb) = w::row_lead(ui, exists, egui::vec2(31.0, 40.0), &name, Some(&meta), |_| {});
+            let (resp, thumb) = w::row_lead(
+                ui,
+                exists,
+                egui::vec2(31.0, 40.0),
+                &name,
+                Some(&meta),
+                |_| {},
+            );
             // A small first page in the row's leading space.
             if ui.is_rect_visible(thumb) {
                 ui.painter().rect_filled(thumb, 0, p.surface);
-                if let Some(Cover::Ready(tex)) = exists.then(|| self.covers.get(ctx, path)).flatten() {
+                if let Some(Cover::Ready(tex)) =
+                    exists.then(|| self.covers.get(ctx, path)).flatten()
+                {
                     let uv = cover_uv(tex.size(), thumb.width() / thumb.height());
-                    ui.painter().image(tex.id(), thumb, uv, egui::Color32::WHITE);
+                    ui.painter()
+                        .image(tex.id(), thumb, uv, egui::Color32::WHITE);
                 }
-                ui.painter().rect_stroke(thumb, 0, Stroke::new(1.0, p.hairline), egui::StrokeKind::Outside);
+                ui.painter().rect_stroke(
+                    thumb,
+                    0,
+                    Stroke::new(1.0, p.hairline),
+                    egui::StrokeKind::Outside,
+                );
             }
             if resp.clicked() {
                 open_req = Some(tile.path.clone());
             }
-            resp.on_hover_text(path.display().to_string()).context_menu(|ui| {
-                if exists && ui.button("Open").clicked() {
-                    open_req = Some(tile.path.clone());
-                    ui.close();
-                }
-                if ui.button("Show in folder").clicked() {
-                    open_file_location(path);
-                    ui.close();
-                }
-                if tile.removable && ui.button("Remove from library").clicked() {
-                    remove_req = Some(i);
-                    ui.close();
-                }
-            });
+            resp.on_hover_text(path.display().to_string())
+                .context_menu(|ui| {
+                    if exists && ui.button("Open").clicked() {
+                        open_req = Some(tile.path.clone());
+                        ui.close();
+                    }
+                    if ui.button("Show in folder").clicked() {
+                        open_file_location(path);
+                        ui.close();
+                    }
+                    if tile.removable && ui.button("Remove from library").clicked() {
+                        remove_req = Some(i);
+                        ui.close();
+                    }
+                });
             w::hairline(ui);
         }
         ui.add_space(12.0);
@@ -573,7 +635,7 @@ impl ViewerApp {
         let name = self
             .books
             .iter()
-            .find(|b| b.path == path)
+            .find(|b| same_path(&b.path, path))
             .map(|b| b.title.clone())
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| {
@@ -589,7 +651,11 @@ impl ViewerApp {
             let cover_size = egui::vec2(tile_w, tile_w / COVER_ASPECT);
             let (slot, resp) = ui.allocate_exact_size(
                 cover_size,
-                if exists { Sense::click() } else { Sense::hover() },
+                if exists {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
             );
             let hover = w::hover_t(ui, &resp, exists);
             let rect = slot.translate(egui::vec2(0.0, -3.0 * hover));
@@ -614,14 +680,22 @@ impl ViewerApp {
                         // A typeset cover: the title in serif on tinted paper.
                         painter.rect_filled(rect, 0, p.accent_wash());
                         let inner = rect.shrink(10.0);
-                        painter.rect_stroke(inner, 0, Stroke::new(1.0, p.accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+                        painter.rect_stroke(
+                            inner,
+                            0,
+                            Stroke::new(1.0, p.accent.gamma_multiply(0.5)),
+                            egui::StrokeKind::Inside,
+                        );
                         let galley = painter.layout(
                             name.clone(),
                             egui::FontId::new((tile_w / 9.0).clamp(12.0, 19.0), theme::serif()),
                             p.ink,
                             inner.width() - 16.0,
                         );
-                        let pos = egui::pos2(inner.center().x - galley.size().x / 2.0, inner.top() + inner.height() * 0.28);
+                        let pos = egui::pos2(
+                            inner.center().x - galley.size().x / 2.0,
+                            inner.top() + inner.height() * 0.28,
+                        );
                         painter.galley(pos, galley, p.ink);
                     }
                     _ => {
@@ -643,20 +717,21 @@ impl ViewerApp {
             if resp.clicked() {
                 open = true;
             }
-            resp.on_hover_text(path.display().to_string()).context_menu(|ui| {
-                if exists && ui.button("Open").clicked() {
-                    open = true;
-                    ui.close();
-                }
-                if ui.button("Show in folder").clicked() {
-                    open_file_location(path);
-                    ui.close();
-                }
-                if tile.removable && ui.button("Remove from library").clicked() {
-                    remove = true;
-                    ui.close();
-                }
-            });
+            resp.on_hover_text(path.display().to_string())
+                .context_menu(|ui| {
+                    if exists && ui.button("Open").clicked() {
+                        open = true;
+                        ui.close();
+                    }
+                    if ui.button("Show in folder").clicked() {
+                        open_file_location(path);
+                        ui.close();
+                    }
+                    if tile.removable && ui.button("Remove from library").clicked() {
+                        remove = true;
+                        ui.close();
+                    }
+                });
 
             ui.add_space(8.0);
             // At most two lines, always two lines' room: every row is the
@@ -718,14 +793,20 @@ impl ViewerApp {
                 for path in paths {
                     self.start_cloud_op(ctx, CloudOp::Upload(path));
                 }
-                self.toast(format!("Uploading {n} document{}", if n == 1 { "" } else { "s" }));
+                self.toast(format!(
+                    "Uploading {n} document{}",
+                    if n == 1 { "" } else { "s" }
+                ));
             }
         }
 
         // Live transfer readout.
         if let Some((done, total, bps)) = self.cloud_progress {
             ui.add_space(8.0);
-            let label = self.cloud_status.clone().unwrap_or_else(|| "Transferring…".into());
+            let label = self
+                .cloud_status
+                .clone()
+                .unwrap_or_else(|| "Transferring…".into());
             ui.label(
                 RichText::new(format!(
                     "{label}  {}%  ·  {}",
@@ -745,8 +826,12 @@ impl ViewerApp {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(
-                    RichText::new(self.cloud_status.clone().unwrap_or_else(|| "Connecting…".into()))
-                        .color(p.muted),
+                    RichText::new(
+                        self.cloud_status
+                            .clone()
+                            .unwrap_or_else(|| "Connecting…".into()),
+                    )
+                    .color(p.muted),
                 );
             });
         }
@@ -801,7 +886,8 @@ impl ViewerApp {
             self.cloud_act(ctx, act);
         }
 
-        if self.cloud_listed && self.cloud_files.is_empty() && self.cloud_local.is_empty() && !busy {
+        if self.cloud_listed && self.cloud_files.is_empty() && self.cloud_local.is_empty() && !busy
+        {
             w::empty_state(
                 ui,
                 "Your bucket is empty",
@@ -820,8 +906,16 @@ impl ViewerApp {
                 } else {
                     "Couldn't reach your bucket"
                 };
-                ui.label(RichText::new(headline).text_style(theme::title()).color(p.ink));
-                ui.label(RichText::new(&msg).small().color(ui.visuals().error_fg_color));
+                ui.label(
+                    RichText::new(headline)
+                        .text_style(theme::title())
+                        .color(p.ink),
+                );
+                ui.label(
+                    RichText::new(&msg)
+                        .small()
+                        .color(ui.visuals().error_fg_color),
+                );
                 ui.add_space(6.0);
                 let mut settings = false;
                 ui.horizontal(|ui| {
@@ -868,20 +962,41 @@ impl ViewerApp {
 
     /// One file. Click: open it (downloading first if needed) — or, while
     /// selecting, tick it. The "…" menu holds everything else.
-    fn cloud_row(&self, ui: &mut egui::Ui, e: &CloudEntry, selecting: bool, acts: &mut Vec<CloudAct>) {
+    fn cloud_row(
+        &self,
+        ui: &mut egui::Ui,
+        e: &CloudEntry,
+        selecting: bool,
+        acts: &mut Vec<CloudAct>,
+    ) {
         let p = w::pal(ui);
-        let picked = e.bucket.as_ref().is_some_and(|b| self.cloud_selected.contains(&b.0));
+        let picked = e
+            .bucket
+            .as_ref()
+            .is_some_and(|b| self.cloud_selected.contains(&b.0));
         let (glyph, sub) = match (&e.local, &e.bucket) {
-            (Some((_, size)), Some(_)) => ("✔", format!("On this computer · {}", cloud::fmt_size(*size))),
-            (Some((_, size)), None) => {
-                ("✔", format!("On this computer only · {}", cloud::fmt_size(*size)))
-            }
+            (Some((_, size)), Some(_)) => (
+                "✔",
+                format!("On this computer · {}", cloud::fmt_size(*size)),
+            ),
+            (Some((_, size)), None) => (
+                "✔",
+                format!("On this computer only · {}", cloud::fmt_size(*size)),
+            ),
             (None, Some((_, _, size, uploaded))) => (
                 "☁",
                 if selecting {
-                    format!("In your bucket · {} · {}", cloud::fmt_size(*size), fmt_ts(uploaded / 1000))
+                    format!(
+                        "In your bucket · {} · {}",
+                        cloud::fmt_size(*size),
+                        fmt_ts(uploaded / 1000)
+                    )
                 } else {
-                    format!("Click to download · {} · {}", cloud::fmt_size(*size), fmt_ts(uploaded / 1000))
+                    format!(
+                        "Click to download · {} · {}",
+                        cloud::fmt_size(*size),
+                        fmt_ts(uploaded / 1000)
+                    )
                 },
             ),
             (None, None) => ("☁", String::new()),
@@ -919,7 +1034,11 @@ impl ViewerApp {
                     }
                 }
                 if let Some((path, _)) = &e.local {
-                    if ui.button("Remove download").on_hover_text("Keeps it in your bucket").clicked() {
+                    if ui
+                        .button("Remove download")
+                        .on_hover_text("Keeps it in your bucket")
+                        .clicked()
+                    {
                         acts.push(CloudAct::RemoveLocal(path.clone()));
                         ui.close();
                     }
@@ -965,7 +1084,12 @@ impl ViewerApp {
             }
             CloudAct::Rename(name, id) => {
                 let draft = name.clone();
-                self.cloud_dialog = Some(CloudDialog::Rename { name, id, draft, focus: true });
+                self.cloud_dialog = Some(CloudDialog::Rename {
+                    name,
+                    id,
+                    draft,
+                    focus: true,
+                });
             }
             CloudAct::Delete(items) => self.cloud_dialog = Some(CloudDialog::Delete { items }),
             CloudAct::Toggle(name) => {
@@ -1054,22 +1178,36 @@ impl ViewerApp {
 
     /// Rename and delete confirmations.
     pub(super) fn cloud_dialogs(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.cloud_dialog.take() else { return };
+        let Some(dialog) = self.cloud_dialog.take() else {
+            return;
+        };
         let p = theme::palette(self.skin, self.theme.is_dark(ctx));
         match dialog {
-            CloudDialog::Rename { name, id, mut draft, focus } => {
+            CloudDialog::Rename {
+                name,
+                id,
+                mut draft,
+                focus,
+            } => {
                 let mut done = false;
                 let mut go = false;
                 let wanted = with_pdf_extension(draft.trim());
                 let clash = wanted != name && self.cloud_files.iter().any(|f| f.name == wanted);
-                let valid = !draft.trim().is_empty() && !draft.contains('/') && wanted != name && !clash;
+                let valid =
+                    !draft.trim().is_empty() && !draft.contains('/') && wanted != name && !clash;
                 let modal = w::modal("cloud-rename", ctx).show(ctx, |ui| {
                     ui.set_width(420.0);
-                    ui.label(RichText::new("Rename").text_style(theme::headline()).color(p.ink));
+                    ui.label(
+                        RichText::new("Rename")
+                            .text_style(theme::headline())
+                            .color(p.ink),
+                    );
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new("It's renamed in your bucket, so your phone sees the new name too.")
-                            .color(p.muted),
+                        RichText::new(
+                            "It's renamed in your bucket, so your phone sees the new name too.",
+                        )
+                        .color(p.muted),
                     );
                     ui.add_space(12.0);
                     let edit = w::field(ui, &mut draft, "New name", false, 380.0);
@@ -1108,7 +1246,12 @@ impl ViewerApp {
                     self.toast(format!("Renaming to {wanted}…"));
                     self.start_cloud_op(ctx, CloudOp::Rename(name, id, wanted));
                 } else if !done && !modal.should_close() {
-                    self.cloud_dialog = Some(CloudDialog::Rename { name, id, draft, focus: false });
+                    self.cloud_dialog = Some(CloudDialog::Rename {
+                        name,
+                        id,
+                        draft,
+                        focus: false,
+                    });
                 }
             }
             CloudDialog::Delete { items } => {
@@ -1122,7 +1265,11 @@ impl ViewerApp {
                     } else {
                         format!("Delete {n} files?")
                     };
-                    ui.label(RichText::new(title).text_style(theme::headline()).color(p.ink));
+                    ui.label(
+                        RichText::new(title)
+                            .text_style(theme::headline())
+                            .color(p.ink),
+                    );
                     ui.add_space(6.0);
                     for (name, _) in items.iter().take(5) {
                         ui.label(RichText::new(format!("·  {name}")).color(p.ink));
@@ -1189,8 +1336,15 @@ enum CloudAct {
 }
 
 pub(super) enum CloudDialog {
-    Rename { name: String, id: String, draft: String, focus: bool },
-    Delete { items: Vec<(String, String)> },
+    Rename {
+        name: String,
+        id: String,
+        draft: String,
+        focus: bool,
+    },
+    Delete {
+        items: Vec<(String, String)>,
+    },
 }
 
 /// Keeps ".pdf" on a new name, adding it if the reader left it off.
@@ -1226,7 +1380,9 @@ fn loading_block(ui: &mut egui::Ui, text: &str, progress: Option<(usize, usize)>
             ui.label(RichText::new(line).color(p.ink));
             if let Some((done, total)) = progress {
                 let frac = done as f32 / total.max(1) as f32;
-                let shown = ui.ctx().animate_value_with_time(ui.id().with("progress"), frac, 0.25);
+                let shown = ui
+                    .ctx()
+                    .animate_value_with_time(ui.id().with("progress"), frac, 0.25);
                 let (bar, _) = ui.allocate_exact_size(egui::vec2(260.0, 3.0), Sense::hover());
                 ui.painter().rect_filled(bar, 2, p.hairline);
                 let mut fill = bar;
@@ -1254,8 +1410,10 @@ fn spinner(ui: &mut egui::Ui, p: &crate::ui::theme::Palette) {
             rect.center() + egui::vec2(a.cos(), a.sin()) * 8.0
         })
         .collect();
-    ui.painter().circle_stroke(rect.center(), 8.0, Stroke::new(2.0, p.hairline));
-    ui.painter().add(egui::Shape::line(points, Stroke::new(2.0, p.accent)));
+    ui.painter()
+        .circle_stroke(rect.center(), 8.0, Stroke::new(2.0, p.hairline));
+    ui.painter()
+        .add(egui::Shape::line(points, Stroke::new(2.0, p.accent)));
     ui.ctx().request_repaint();
 }
 
@@ -1270,9 +1428,12 @@ fn group_label(ui: &mut egui::Ui, text: &str, count: usize) {
                 .extra_letter_spacing(1.0)
                 .color(p.muted),
         );
-        ui.label(RichText::new(count.to_string()).text_style(theme::label()).color(p.muted));
+        ui.label(
+            RichText::new(count.to_string())
+                .text_style(theme::label())
+                .color(p.muted),
+        );
     });
     ui.add_space(2.0);
     w::hairline(ui);
 }
-

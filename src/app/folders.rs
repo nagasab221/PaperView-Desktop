@@ -41,14 +41,24 @@ pub(super) fn scan(root: &Path) -> Listing {
     docs.sort_by_cached_key(|d: &FolderDoc| {
         (
             d.subdir.to_lowercase(),
-            d.path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default(),
+            d.path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
         )
     });
-    Listing { root: root.to_path_buf(), docs, missing, truncated }
+    Listing {
+        root: root.to_path_buf(),
+        docs,
+        missing,
+        truncated,
+    }
 }
 
 fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<FolderDoc>, truncated: &mut bool) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
         if out.len() >= MAX_FILES {
@@ -60,7 +70,9 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<FolderDoc>, truncat
         if name.starts_with('.') {
             continue; // hidden files and folders
         }
-        let Ok(kind) = entry.file_type() else { continue };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
         if kind.is_dir() {
             if depth < MAX_DEPTH {
@@ -79,7 +91,9 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<FolderDoc>, truncat
                 path,
                 subdir,
                 len: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-                modified: meta.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH),
+                modified: meta
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH),
             });
         }
     }
@@ -89,11 +103,18 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<FolderDoc>, truncat
 }
 
 pub(super) fn encode(folders: &[PathBuf]) -> String {
-    folders.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n")
+    folders
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn decode(raw: &str) -> Vec<PathBuf> {
-    raw.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect()
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 impl ViewerApp {
@@ -117,7 +138,10 @@ impl ViewerApp {
     }
 
     pub(super) fn pick_folder(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().set_title("Add a folder of PDFs").pick_folder() {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Add a folder of PDFs")
+            .pick_folder()
+        {
             self.add_folder(path);
         }
     }
@@ -152,8 +176,10 @@ impl ViewerApp {
                     self.covers.seed(&doc.path, doc.len, secs);
                 }
                 // Folders removed while scanning don't come back.
-                self.folder_listings =
-                    listings.into_iter().filter(|l| self.folders.contains(&l.root)).collect();
+                self.folder_listings = listings
+                    .into_iter()
+                    .filter(|l| self.folders.contains(&l.root))
+                    .collect();
                 self.folder_scan = None;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.folder_scan = None,
@@ -194,7 +220,13 @@ mod tests {
         let names: Vec<String> = listing
             .docs
             .iter()
-            .map(|d| format!("{}|{}", d.subdir, d.path.file_name().unwrap().to_string_lossy()))
+            .map(|d| {
+                format!(
+                    "{}|{}",
+                    d.subdir,
+                    d.path.file_name().unwrap().to_string_lossy()
+                )
+            })
             .collect();
         assert_eq!(names, ["|A.PDF", "|b.pdf", "Week 2|c.pdf"]);
         assert!(!listing.missing);
@@ -205,7 +237,10 @@ mod tests {
 
     #[test]
     fn folder_list_round_trips() {
-        let list = vec![PathBuf::from("/home/me/Med school"), PathBuf::from("/tmp/x")];
+        let list = vec![
+            PathBuf::from("/home/me/Med school"),
+            PathBuf::from("/tmp/x"),
+        ];
         assert_eq!(decode(&encode(&list)), list);
     }
 }

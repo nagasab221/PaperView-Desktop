@@ -13,7 +13,11 @@ pub fn open_txt(path: &Path) -> Result<Book, String> {
     let text = super::decode_text(&bytes).replace("\r\n", "\n");
     let mut blocks = Vec::new();
     for para in text.split("\n\n") {
-        let lines: Vec<&str> = para.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = para
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         if lines.is_empty() {
             continue;
         }
@@ -22,18 +26,36 @@ pub fn open_txt(path: &Path) -> Result<Book, String> {
         let has_letters = joined.chars().any(|c| c.is_alphabetic());
         let shouty = has_letters && !joined.chars().any(|c| c.is_lowercase());
         let lower = joined.to_lowercase();
-        let chapterish = lower.starts_with("chapter ") || lower.starts_with("book ") || lower.starts_with("part ");
-        let run = vec![Run { text: joined, style: Style::default() }];
-        blocks.push(if lines.len() == 1 && words <= 8 && (shouty || chapterish) {
-            Block::Heading { level: 2, runs: run }
-        } else {
-            Block::Para { runs: run }
-        });
+        let chapterish = lower.starts_with("chapter ")
+            || lower.starts_with("book ")
+            || lower.starts_with("part ");
+        let run = vec![Run {
+            text: joined,
+            style: Style::default(),
+        }];
+        blocks.push(
+            if lines.len() == 1 && words <= 8 && (shouty || chapterish) {
+                Block::Heading {
+                    level: 2,
+                    runs: run,
+                }
+            } else {
+                Block::Para { runs: run }
+            },
+        );
     }
     if blocks.is_empty() {
         return Err("This text file is empty".into());
     }
-    Ok(Book { title: String::new(), author: None, content: Content::Text { blocks, images: Vec::new() }, chapters: Vec::new() })
+    Ok(Book {
+        title: String::new(),
+        author: None,
+        content: Content::Text {
+            blocks,
+            images: Vec::new(),
+        },
+        chapters: Vec::new(),
+    })
 }
 
 pub fn open_html(path: &Path) -> Result<Book, String> {
@@ -67,5 +89,10 @@ pub fn open_html(path: &Path) -> Result<Book, String> {
     if blocks.is_empty() {
         return Err("Couldn't find any text in this file".into());
     }
-    Ok(Book { title, author: None, content: Content::Text { blocks, images }, chapters: Vec::new() })
+    Ok(Book {
+        title,
+        author: None,
+        content: Content::Text { blocks, images },
+        chapters: Vec::new(),
+    })
 }

@@ -198,21 +198,37 @@ impl Palette {
     /// The tray the document tabs sit in: a shade deeper than the page, so
     /// the active tab — a card in the page's own colour — stands forward.
     pub fn tray(&self) -> Color32 {
-        Self::mix(self.background, self.ink, if self.dark { 0.045 } else { 0.035 })
+        Self::mix(
+            self.background,
+            self.ink,
+            if self.dark { 0.045 } else { 0.035 },
+        )
     }
 
     /// The faint wash behind a hovered row or button.
     pub fn hover(&self) -> Color32 {
-        Self::mix(self.background, self.ink, if self.dark { 0.08 } else { 0.05 })
+        Self::mix(
+            self.background,
+            self.ink,
+            if self.dark { 0.08 } else { 0.05 },
+        )
     }
 
     pub fn pressed(&self) -> Color32 {
-        Self::mix(self.background, self.ink, if self.dark { 0.14 } else { 0.10 })
+        Self::mix(
+            self.background,
+            self.ink,
+            if self.dark { 0.14 } else { 0.10 },
+        )
     }
 
     /// The accent as a soft tint, for selected-but-not-primary states.
     pub fn accent_wash(&self) -> Color32 {
-        Self::mix(self.background, self.accent, if self.dark { 0.22 } else { 0.14 })
+        Self::mix(
+            self.background,
+            self.accent,
+            if self.dark { 0.22 } else { 0.14 },
+        )
     }
 }
 
@@ -269,19 +285,36 @@ pub fn install_fonts(ctx: &egui::Context) {
         list.extend(fallbacks.iter().cloned());
         list
     };
-    fonts.families.insert(FontFamily::Proportional, with("noto-sans"));
+    fonts
+        .families
+        .insert(FontFamily::Proportional, with("noto-sans"));
     fonts.families.insert(medium(), with("noto-sans-medium"));
     let mut serif_list = vec!["noto-serif".to_string(), "noto-sans".to_string()];
     serif_list.extend(fallbacks.iter().cloned());
     fonts.families.insert(serif(), serif_list);
     // Book text needs real bold and italic faces, not synthesised ones.
     for (family, file) in [
-        ("serif-bold", &include_bytes!("../../assets/fonts/NotoSerif-Bold.ttf")[..]),
-        ("serif-italic", &include_bytes!("../../assets/fonts/NotoSerif-Italic.ttf")[..]),
-        ("serif-bolditalic", &include_bytes!("../../assets/fonts/NotoSerif-BoldItalic.ttf")[..]),
+        (
+            "serif-bold",
+            &include_bytes!("../../assets/fonts/NotoSerif-Bold.ttf")[..],
+        ),
+        (
+            "serif-italic",
+            &include_bytes!("../../assets/fonts/NotoSerif-Italic.ttf")[..],
+        ),
+        (
+            "serif-bolditalic",
+            &include_bytes!("../../assets/fonts/NotoSerif-BoldItalic.ttf")[..],
+        ),
     ] {
-        fonts.font_data.insert(family.into(), FontData::from_static(file).into());
-        let mut list = vec![family.to_string(), "noto-serif".to_string(), "noto-sans".to_string()];
+        fonts
+            .font_data
+            .insert(family.into(), FontData::from_static(file).into());
+        let mut list = vec![
+            family.to_string(),
+            "noto-serif".to_string(),
+            "noto-sans".to_string(),
+        ];
         list.extend(fallbacks.iter().cloned());
         fonts.families.insert(FontFamily::Name(family.into()), list);
     }
@@ -290,7 +323,11 @@ pub fn install_fonts(ctx: &egui::Context) {
 
 /// Applies the palette to every egui style: colours, type scale, spacing.
 pub fn apply(ctx: &egui::Context, p: &Palette) {
-    let theme = if p.dark { egui::Theme::Dark } else { egui::Theme::Light };
+    let theme = if p.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
     // Pin egui's own light/dark to ours so System never flips one without
     // the other.
     ctx.set_theme(theme);
@@ -303,10 +340,19 @@ pub fn apply(ctx: &egui::Context, p: &Palette) {
             (title(), FontId::new(17.0, serif())),
             (TextStyle::Heading, FontId::new(19.0, serif())),
             (TextStyle::Body, FontId::new(14.5, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-            (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(14.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Small,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
             (label(), FontId::new(11.5, medium())),
-            (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+            (
+                TextStyle::Monospace,
+                FontId::new(13.0, FontFamily::Monospace),
+            ),
         ]
         .into();
 

@@ -105,7 +105,11 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>, b: Btn) -> Response {
         f32::INFINITY,
         egui::TextStyle::Button,
     );
-    let pad = if b.kind == Kind::Inline { Vec2::new(6.0, 4.0) } else { Vec2::new(11.0, 5.0) };
+    let pad = if b.kind == Kind::Inline {
+        Vec2::new(6.0, 4.0)
+    } else {
+        Vec2::new(11.0, 5.0)
+    };
     let size = (galley.size() + pad * 2.0).max(b.min);
     let sense = if b.enabled { b.sense } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
@@ -121,15 +125,25 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>, b: Btn) -> Response {
             (_, false) => (Color32::TRANSPARENT, Stroke::NONE, p.muted),
             (Kind::Primary, true) => {
                 let lift = Palette::mix(p.accent, p.ink, 0.12);
-                (p.accent.lerp_to_gamma(lift, hover * 0.6 + press * 0.4), Stroke::NONE, p.on_accent)
+                (
+                    p.accent.lerp_to_gamma(lift, hover * 0.6 + press * 0.4),
+                    Stroke::NONE,
+                    p.on_accent,
+                )
             }
             (Kind::Danger, true) => {
                 let red = ui.visuals().error_fg_color;
                 let deep = Palette::mix(red, p.ink, 0.15);
-                (red.lerp_to_gamma(deep, hover * 0.6 + press * 0.4), Stroke::NONE, p.surface)
+                (
+                    red.lerp_to_gamma(deep, hover * 0.6 + press * 0.4),
+                    Stroke::NONE,
+                    p.surface,
+                )
             }
             (Kind::Outlined, true) => (
-                p.hover().gamma_multiply(hover).lerp_to_gamma(p.pressed(), press),
+                p.hover()
+                    .gamma_multiply(hover)
+                    .lerp_to_gamma(p.pressed(), press),
                 Stroke::new(1.0, p.hairline.lerp_to_gamma(p.muted, hover * 0.6)),
                 p.ink,
             ),
@@ -139,12 +153,16 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>, b: Btn) -> Response {
                 p.accent,
             ),
             (Kind::Inline, true) => (
-                p.hover().gamma_multiply(hover * 0.8).lerp_to_gamma(p.pressed(), press),
+                p.hover()
+                    .gamma_multiply(hover * 0.8)
+                    .lerp_to_gamma(p.pressed(), press),
                 Stroke::NONE,
                 p.accent,
             ),
             (Kind::Quiet, true) => (
-                p.hover().gamma_multiply(hover).lerp_to_gamma(p.pressed(), press),
+                p.hover()
+                    .gamma_multiply(hover)
+                    .lerp_to_gamma(p.pressed(), press),
                 Stroke::NONE,
                 p.ink,
             ),
@@ -173,7 +191,11 @@ pub fn inline_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
 pub fn tool_button(ui: &mut Ui, text: &str, on: bool) -> Response {
     let rt = RichText::new(text);
     let rt = if on { rt.family(theme::medium()) } else { rt };
-    button(ui, rt, Btn::new(if on { Kind::Selected } else { Kind::Quiet }).min(0.0, 30.0))
+    button(
+        ui,
+        rt,
+        Btn::new(if on { Kind::Selected } else { Kind::Quiet }).min(0.0, 30.0),
+    )
 }
 
 /// The primary action: solid accent.
@@ -187,7 +209,11 @@ pub fn primary_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
 
 /// A secondary action: hairline outline.
 pub fn outlined_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
-    button(ui, text, Btn::new(Kind::Outlined).enabled(enabled).min(0.0, 32.0))
+    button(
+        ui,
+        text,
+        Btn::new(Kind::Outlined).enabled(enabled).min(0.0, 32.0),
+    )
 }
 
 /// A square glyph button with a tooltip; `on` tints it with the accent.
@@ -207,7 +233,11 @@ pub fn hairline(ui: &mut Ui) {
     let p = pal(ui);
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), Sense::hover());
-    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, p.hairline));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, p.hairline),
+    );
 }
 
 /// A section label: small, letterspaced, uppercase, over a rule.
@@ -233,7 +263,11 @@ pub fn masthead(ui: &mut Ui, title: &str, subtitle: Option<&str>, actions: impl 
     ui.add_space(22.0);
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new(title).text_style(theme::display()).color(p.ink));
+            ui.label(
+                RichText::new(title)
+                    .text_style(theme::display())
+                    .color(p.ink),
+            );
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).small().color(p.muted));
             }
@@ -248,7 +282,8 @@ pub fn field(ui: &mut Ui, value: &mut String, hint: &str, password: bool, width:
     let id = ui.next_auto_id();
     let focus = ui.ctx().animate_bool_with_time(
         id.with("focus"),
-        ui.memory(|m| m.focused()).is_some_and(|f| f == id.with("edit")),
+        ui.memory(|m| m.focused())
+            .is_some_and(|f| f == id.with("edit")),
         HOVER_FADE,
     );
     egui::Frame::NONE
@@ -288,7 +323,15 @@ pub fn row(
     subtitle: Option<&str>,
     trailing: impl FnOnce(&mut Ui),
 ) -> Response {
-    row_impl(ui, clickable, glyph.map(Lead::Glyph).unwrap_or(Lead::None), title, subtitle, trailing).0
+    row_impl(
+        ui,
+        clickable,
+        glyph.map(Lead::Glyph).unwrap_or(Lead::None),
+        title,
+        subtitle,
+        trailing,
+    )
+    .0
 }
 
 /// A row with an empty leading area of `lead` size (for a thumbnail, say);
@@ -326,7 +369,11 @@ fn row_impl(
     let builder = egui::UiBuilder::new()
         .id_salt(("row", title))
         .layout(Layout::left_to_right(Align::Center))
-        .sense(if clickable { Sense::click() } else { Sense::hover() });
+        .sense(if clickable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        });
     let resp = ui
         .scope_builder(builder, |ui| {
             ui.set_width(width);
@@ -337,7 +384,8 @@ fn row_impl(
                 Lead::Glyph(g) => {
                     ui.add_sized(
                         [24.0, 24.0],
-                        egui::Label::new(RichText::new(g).size(17.0).color(p.muted)).selectable(false),
+                        egui::Label::new(RichText::new(g).size(17.0).color(p.muted))
+                            .selectable(false),
                     );
                     ui.add_space(6.0);
                 }
@@ -367,10 +415,14 @@ fn row_impl(
         .response;
     if clickable {
         let hovering = resp.hovered() || resp.contains_pointer();
-        let t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), hovering, HOVER_FADE);
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hover"), hovering, HOVER_FADE);
         if t > 0.0 {
-            ui.painter()
-                .set(wash, egui::epaint::RectShape::filled(resp.rect, 4, p.hover().gamma_multiply(t)));
+            ui.painter().set(
+                wash,
+                egui::epaint::RectShape::filled(resp.rect, 4, p.hover().gamma_multiply(t)),
+            );
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -423,11 +475,21 @@ pub fn text_tabs(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize>
         for (i, label) in labels.iter().enumerate() {
             let on = i == selected;
             let galley = WidgetText::from(RichText::new(*label).family(theme::medium()).size(14.5))
-                .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                );
             let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::click());
             let t = hover_t(ui, &resp, !on);
-            let on_t = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, HOVER_FADE);
-            let color = p.muted.lerp_to_gamma(p.ink, t * 0.8).lerp_to_gamma(p.accent, on_t);
+            let on_t = ui
+                .ctx()
+                .animate_bool_with_time(resp.id.with("on"), on, HOVER_FADE);
+            let color = p
+                .muted
+                .lerp_to_gamma(p.ink, t * 0.8)
+                .lerp_to_gamma(p.accent, on_t);
             ui.painter().galley(rect.min, galley, color);
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -441,10 +503,15 @@ pub fn text_tabs(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize>
     // One underline, gliding between tabs.
     if let Some(target) = spans.get(selected) {
         let id = row.response.id.with("underline");
-        let left = ui.ctx().animate_value_with_time(id.with("l"), target.min, 0.18);
-        let right = ui.ctx().animate_value_with_time(id.with("r"), target.max, 0.18);
+        let left = ui
+            .ctx()
+            .animate_value_with_time(id.with("l"), target.min, 0.18);
+        let right = ui
+            .ctx()
+            .animate_value_with_time(id.with("r"), target.max, 0.18);
         let y = row.response.rect.bottom() + 7.0;
-        ui.painter().hline(left..=right, y, Stroke::new(2.0, p.accent));
+        ui.painter()
+            .hline(left..=right, y, Stroke::new(2.0, p.accent));
     }
     ui.add_space(6.0);
     hairline(ui);
@@ -455,8 +522,14 @@ pub fn text_tabs(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize>
 pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
     let p = pal(ui);
     let size = egui::vec2(38.0, 22.0);
-    let (rect, mut resp) =
-        ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    let (rect, mut resp) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
     if enabled && resp.clicked() {
         *on = !*on;
         resp.mark_changed();
@@ -472,11 +545,22 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
         rect,
         11,
         track,
-        Stroke::new(1.0, if enabled { p.hairline.lerp_to_gamma(p.accent, t) } else { p.hairline }),
+        Stroke::new(
+            1.0,
+            if enabled {
+                p.hairline.lerp_to_gamma(p.accent, t)
+            } else {
+                p.hairline
+            },
+        ),
         StrokeKind::Inside,
     );
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    let knob = if enabled { p.muted.lerp_to_gamma(p.on_accent, t) } else { p.muted };
+    let knob = if enabled {
+        p.muted.lerp_to_gamma(p.on_accent, t)
+    } else {
+        p.muted
+    };
     painter.circle_filled(egui::pos2(x, rect.center().y), 7.0, knob);
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -505,7 +589,11 @@ pub fn empty_state(ui: &mut Ui, title: &str, body: &str, action: Option<(&str, &
     let p = pal(ui);
     ui.add_space(56.0);
     ui.vertical_centered(|ui| {
-        ui.label(RichText::new(title).text_style(theme::headline()).color(p.ink));
+        ui.label(
+            RichText::new(title)
+                .text_style(theme::headline())
+                .color(p.ink),
+        );
         ui.add_space(6.0);
         ui.label(RichText::new(body).color(p.muted));
         if let Some((label, pressed)) = action {
@@ -543,7 +631,10 @@ pub fn fade_in(ui: &mut Ui, slot: &str, key: impl std::hash::Hash + std::fmt::De
     let now = ui.input(|i| i.time);
     let previous = ui.ctx().data(|d| d.get_temp::<egui::Id>(current));
     let started = match previous {
-        Some(prev) if prev == id => ui.ctx().data(|d| d.get_temp::<f64>(id)).unwrap_or(now - 1.0),
+        Some(prev) if prev == id => ui
+            .ctx()
+            .data(|d| d.get_temp::<f64>(id))
+            .unwrap_or(now - 1.0),
         Some(prev) => {
             // Switched: start this view's fade now.
             ui.ctx().data_mut(|d| {

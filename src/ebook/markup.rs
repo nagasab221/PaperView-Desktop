@@ -10,8 +10,14 @@ use super::{Block, Run, Style};
 
 #[derive(Debug, PartialEq)]
 pub enum Token {
-    Start { name: String, attrs: Vec<(String, String)>, closed: bool },
-    End { name: String },
+    Start {
+        name: String,
+        attrs: Vec<(String, String)>,
+        closed: bool,
+    },
+    End {
+        name: String,
+    },
     Text(String),
 }
 
@@ -52,13 +58,19 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             let end = tag_end(b, i + 1);
             let inner = &src[i + 1..end.min(b.len())];
             if let Some(name) = inner.strip_prefix('/') {
-                out.push(Token::End { name: tag_name(name) });
+                out.push(Token::End {
+                    name: tag_name(name),
+                });
             } else {
                 let closed = inner.trim_end().ends_with('/');
                 let inner = inner.trim_end().trim_end_matches('/');
                 let name = tag_name(inner);
                 let attrs = parse_attrs(&inner[name.len().min(inner.len())..]);
-                out.push(Token::Start { name, attrs, closed });
+                out.push(Token::Start {
+                    name,
+                    attrs,
+                    closed,
+                });
             }
             i = (end + 1).min(b.len());
             text_start = i;
@@ -164,7 +176,8 @@ pub fn decode_entities(s: &str) -> String {
         let end = after.find(';').filter(|e| *e <= 10);
         let decoded = end.and_then(|e| {
             let name = &after[..e];
-            let ch = if let Some(num) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+            let ch = if let Some(num) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X"))
+            {
                 u32::from_str_radix(num, 16).ok().and_then(char::from_u32)
             } else if let Some(num) = name.strip_prefix('#') {
                 num.parse::<u32>().ok().and_then(char::from_u32)
@@ -275,7 +288,10 @@ impl<'a> Builder<'a> {
     }
 
     fn style(&self) -> Style {
-        Style { bold: self.bold > 0, italic: self.italic > 0 }
+        Style {
+            bold: self.bold > 0,
+            italic: self.italic > 0,
+        }
     }
 
     fn push_text(&mut self, text: &str) {
@@ -370,7 +386,11 @@ impl<'a> Builder<'a> {
                         self.push_text(t);
                     }
                 }
-                Token::Start { name, attrs, closed } => {
+                Token::Start {
+                    name,
+                    attrs,
+                    closed,
+                } => {
                     let name = name.as_str();
                     if self.skip > 0 {
                         if !closed && is_skipped(name, self.fb2) {
@@ -579,10 +599,14 @@ mod tests {
         assert!(matches!(&blocks[0], Block::Heading { level: 1, .. }));
         assert_eq!(text(&blocks[0]), "Chapter\u{a0}One");
         assert_eq!(text(&blocks[1]), "It was a dark and stormy night & more…");
-        let Block::Para { runs } = &blocks[1] else { panic!() };
+        let Block::Para { runs } = &blocks[1] else {
+            panic!()
+        };
         assert!(runs.iter().any(|r| r.text == "dark" && r.style.italic));
         assert!(runs.iter().any(|r| r.text == "stormy" && r.style.bold));
-        let Block::Para { runs } = &blocks[2] else { panic!() };
+        let Block::Para { runs } = &blocks[2] else {
+            panic!()
+        };
         assert!(runs.iter().any(|r| r.text == "line" && r.style.italic));
         assert_eq!(blocks[3], Block::Rule);
         assert_eq!(blocks[4], Block::PageBreak);
@@ -590,7 +614,10 @@ mod tests {
 
     #[test]
     fn survives_tag_soup() {
-        let blocks = blocks_of("<p>open <b>never closed<p>next < 3 > 2 <!-- c --> end", false);
+        let blocks = blocks_of(
+            "<p>open <b>never closed<p>next < 3 > 2 <!-- c --> end",
+            false,
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(text(&blocks[1]), "next < 3 > 2 end");
     }

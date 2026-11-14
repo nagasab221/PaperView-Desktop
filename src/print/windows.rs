@@ -134,7 +134,6 @@ impl Drop for PrintTicket {
     }
 }
 
-
 /// Shows the system print dialog. `Ok(None)` = user cancelled.
 pub fn show_dialog(owner_hwnd: isize, page_count: i32) -> Result<Option<PrintTicket>, String> {
     unsafe {
@@ -197,7 +196,14 @@ pub fn spawn_print(
             let _ = tx.send(e);
             repaint.request_repaint();
         };
-        match run(engine, &path, password.as_deref(), &ticket, &doc_name, &send) {
+        match run(
+            engine,
+            &path,
+            password.as_deref(),
+            &ticket,
+            &doc_name,
+            &send,
+        ) {
             Ok(pages) => send(PrintEvent::Done(pages)),
             Err(e) => send(PrintEvent::Error(e)),
         }

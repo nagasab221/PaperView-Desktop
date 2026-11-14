@@ -42,9 +42,16 @@ impl ViewerApp {
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let title = match &self.book {
             Some(v) => Some(v.title.clone()),
-            None => self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.title.clone()),
+            None => self
+                .active_tab
+                .and_then(|i| self.tabs.get(i))
+                .map(|t| t.title.clone()),
         };
-        let fill = if self.tabs.is_empty() { p.background } else { p.tray() };
+        let fill = if self.tabs.is_empty() {
+            p.background
+        } else {
+            p.tray()
+        };
         egui::Panel::top("titlebar")
             .exact_size(TITLE_H)
             .frame(egui::Frame::NONE.fill(fill))
@@ -52,7 +59,8 @@ impl ViewerApp {
             .show(ui, |ui| {
                 let bar = ui.max_rect();
                 // The whole bar drags the window; buttons drawn on top win.
-                let drag = ui.interact(bar, egui::Id::new("titlebar-drag"), Sense::click_and_drag());
+                let drag =
+                    ui.interact(bar, egui::Id::new("titlebar-drag"), Sense::click_and_drag());
                 if drag.double_clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                 } else if drag.drag_started_by(egui::PointerButton::Primary) {
@@ -71,7 +79,11 @@ impl ViewerApp {
                     |ui| self.overflow_menu(ui, &ctx),
                 );
                 if self.tabs.is_empty() {
-                    ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.hairline));
+                    ui.painter().hline(
+                        bar.x_range(),
+                        bar.bottom() - 0.5,
+                        Stroke::new(1.0, p.hairline),
+                    );
                 }
 
                 // Title, centred on the whole window rather than the free space.
@@ -108,14 +120,26 @@ impl ViewerApp {
                 let mut x = bar.right();
                 for which in [WinBtn::Close, WinBtn::Maximize, WinBtn::Minimize] {
                     x -= WIN_BTN_W;
-                    let rect = egui::Rect::from_min_size(egui::pos2(x, bar.top()), egui::vec2(WIN_BTN_W, TITLE_H));
-                    let resp = ui.interact(rect, egui::Id::new(("winbtn", which as u8)), Sense::click());
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(x, bar.top()),
+                        egui::vec2(WIN_BTN_W, TITLE_H),
+                    );
+                    let resp =
+                        ui.interact(rect, egui::Id::new(("winbtn", which as u8)), Sense::click());
                     let t = w::hover_t(ui, &resp, true);
                     let close = which == WinBtn::Close;
                     let red = egui::Color32::from_rgb(0xD9, 0x3B, 0x30);
-                    let fill = if close { red.gamma_multiply(t) } else { p.hover().gamma_multiply(t) };
+                    let fill = if close {
+                        red.gamma_multiply(t)
+                    } else {
+                        p.hover().gamma_multiply(t)
+                    };
                     ui.painter().rect_filled(rect, 0, fill);
-                    let ink = if close { p.ink.lerp_to_gamma(egui::Color32::WHITE, t) } else { p.ink };
+                    let ink = if close {
+                        p.ink.lerp_to_gamma(egui::Color32::WHITE, t)
+                    } else {
+                        p.ink
+                    };
                     let behind = fill.lerp_to_gamma(p.hover(), t);
                     paint_win_glyph(ui.painter(), rect.center(), which, maximized, ink, behind);
                     if resp.clicked() {
@@ -145,10 +169,20 @@ impl ViewerApp {
         let screen = ctx.content_rect();
         let p = theme::palette(self.skin, self.theme.is_dark(ctx));
         // A hairline frame, so the window has an edge on any wallpaper.
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window-edge")))
-            .rect_stroke(screen, 0, Stroke::new(1.0, p.hairline.lerp_to_gamma(p.muted, 0.35)), egui::StrokeKind::Inside);
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("window-edge"),
+        ))
+        .rect_stroke(
+            screen,
+            0,
+            Stroke::new(1.0, p.hairline.lerp_to_gamma(p.muted, 0.35)),
+            egui::StrokeKind::Inside,
+        );
 
-        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
         const GRIP: f32 = 6.0;
         const CORNER: f32 = 14.0;
         let (l, r, t, b) = (
@@ -206,58 +240,75 @@ impl ViewerApp {
                 // The active tab's underline sits right on the rule below.
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let full = ui.available_width();
-                ui.allocate_ui_with_layout(egui::vec2(full, TAB_H), Layout::left_to_right(Align::Center), |ui| {
-                    ui.set_min_height(TAB_H);
-                    // Tabs fill exactly this band, wherever egui lays them out.
-                    let band = ui.max_rect().y_range();
-                    ui.add_space(4.0);
-                    let tabs_w = (ui.available_width() - ACTIONS_W).max(80.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(tabs_w, TAB_H),
-                        Layout::left_to_right(Align::Center),
-                        |ui| self.tab_strip(ui, &ctx, band),
-                    );
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        if self.book.is_some() {
-                            let open = self.sidebar != SidebarMode::Hidden;
-                            if w::icon_button(ui, "📖", "Contents", open).clicked() {
-                                self.sidebar = if open { SidebarMode::Hidden } else { SidebarMode::Toc };
-                            }
-                        }
-                        if self.doc.is_some() {
-                            if w::icon_button(ui, "🔍", "Find in document (Ctrl+F)", self.search_open)
-                                .clicked()
-                            {
-                                if self.search_open {
-                                    self.close_search();
-                                } else {
-                                    self.search_open = true;
-                                    self.focus_search = true;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(full, TAB_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_min_height(TAB_H);
+                        // Tabs fill exactly this band, wherever egui lays them out.
+                        let band = ui.max_rect().y_range();
+                        ui.add_space(4.0);
+                        let tabs_w = (ui.available_width() - ACTIONS_W).max(80.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(tabs_w, TAB_H),
+                            Layout::left_to_right(Align::Center),
+                            |ui| self.tab_strip(ui, &ctx, band),
+                        );
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            if self.book.is_some() {
+                                let open = self.sidebar != SidebarMode::Hidden;
+                                if w::icon_button(ui, "📖", "Contents", open).clicked() {
+                                    self.sidebar = if open {
+                                        SidebarMode::Hidden
+                                    } else {
+                                        SidebarMode::Toc
+                                    };
                                 }
                             }
-                            let open = self.sidebar != SidebarMode::Hidden;
-                            if w::icon_button(ui, "📖", "Pages and contents", open).clicked() {
-                                self.sidebar = if open {
-                                    SidebarMode::Hidden
-                                } else if self.toc.is_empty() {
-                                    SidebarMode::Thumbs
-                                } else {
-                                    SidebarMode::Toc
-                                };
+                            if self.doc.is_some() {
+                                if w::icon_button(
+                                    ui,
+                                    "🔍",
+                                    "Find in document (Ctrl+F)",
+                                    self.search_open,
+                                )
+                                .clicked()
+                                {
+                                    if self.search_open {
+                                        self.close_search();
+                                    } else {
+                                        self.search_open = true;
+                                        self.focus_search = true;
+                                    }
+                                }
+                                let open = self.sidebar != SidebarMode::Hidden;
+                                if w::icon_button(ui, "📖", "Pages and contents", open).clicked()
+                                {
+                                    self.sidebar = if open {
+                                        SidebarMode::Hidden
+                                    } else if self.toc.is_empty() {
+                                        SidebarMode::Thumbs
+                                    } else {
+                                        SidebarMode::Toc
+                                    };
+                                }
                             }
-                        }
-                    });
-                });
+                        });
+                    },
+                );
                 // The rule under the tabs, broken where the active card joins
                 // the page below.
-                let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+                let (rule, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
                 let stroke = Stroke::new(1.0, p.hairline);
                 match self.active_tab_span {
                     Some(span) => {
-                        ui.painter().hline(rule.left()..=span.min, rule.center().y, stroke);
-                        ui.painter().hline(span.max..=rule.right(), rule.center().y, stroke);
+                        ui.painter()
+                            .hline(rule.left()..=span.min, rule.center().y, stroke);
+                        ui.painter()
+                            .hline(span.max..=rule.right(), rule.center().y, stroke);
                     }
                     None => {
                         ui.painter().hline(rule.x_range(), rule.center().y, stroke);
@@ -353,12 +404,22 @@ impl ViewerApp {
             }
             let enabled = self.search.active;
             let arrow = |ui: &mut egui::Ui, glyph: &str| {
-                w::button(ui, RichText::new(glyph).size(15.0), w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0))
+                w::button(
+                    ui,
+                    RichText::new(glyph).size(15.0),
+                    w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0),
+                )
             };
-            if arrow(ui, "⏶").on_hover_text("Previous match (Shift+F3)").clicked() {
+            if arrow(ui, "⏶")
+                .on_hover_text("Previous match (Shift+F3)")
+                .clicked()
+            {
                 self.search_step(-1);
             }
-            if arrow(ui, "⏷").on_hover_text("Next match (F3, Enter)").clicked() {
+            if arrow(ui, "⏷")
+                .on_hover_text("Next match (F3, Enter)")
+                .clicked()
+            {
                 self.search_step(1);
             }
             if self.search.active {
@@ -399,10 +460,22 @@ impl ViewerApp {
             };
             if self.doc.is_some() {
                 let single = self.mode == ViewMode::Single;
-                if ui.add(item(if single { "Continuous scroll" } else { "Single page" }, ""))
+                if ui
+                    .add(item(
+                        if single {
+                            "Continuous scroll"
+                        } else {
+                            "Single page"
+                        },
+                        "",
+                    ))
                     .clicked()
                 {
-                    self.mode = if single { ViewMode::Continuous } else { ViewMode::Single };
+                    self.mode = if single {
+                        ViewMode::Continuous
+                    } else {
+                        ViewMode::Single
+                    };
                     self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
                     ui.close();
                 }
@@ -416,7 +489,11 @@ impl ViewerApp {
                 }
                 ui.separator();
                 let has_spot = self.peek_spot().is_some();
-                let label = if has_spot { "Move peek spot here" } else { "Set peek spot here" };
+                let label = if has_spot {
+                    "Move peek spot here"
+                } else {
+                    "Set peek spot here"
+                };
                 if ui.add(item(label, "Shift+Q")).clicked() {
                     self.save_peek_spot();
                     ui.close();
@@ -426,7 +503,10 @@ impl ViewerApp {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(!self.printing, item("Print…", "Ctrl+P")).clicked() {
+                if ui
+                    .add_enabled(!self.printing, item("Print…", "Ctrl+P"))
+                    .clicked()
+                {
                     ui.close();
                     self.start_print(ctx);
                 }
@@ -453,7 +533,17 @@ impl ViewerApp {
                     self.close_doc(ctx);
                 }
             } else if self.book.is_some() {
-                if ui.add(item(if self.book_spread { "One page at a time" } else { "Two pages" }, "")).clicked() {
+                if ui
+                    .add(item(
+                        if self.book_spread {
+                            "One page at a time"
+                        } else {
+                            "Two pages"
+                        },
+                        "",
+                    ))
+                    .clicked()
+                {
                     self.set_book_spread(!self.book_spread);
                     ui.close();
                 }
@@ -515,27 +605,34 @@ impl ViewerApp {
                 // Fixed height with every control centred on it: a plain
                 // horizontal row only centres against what came before.
                 let full = ui.available_width();
-                ui.allocate_ui_with_layout(egui::vec2(full, BAR_H), Layout::left_to_right(Align::Center), |ui| {
-                    ui.set_min_height(BAR_H);
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    ui.add_space(10.0);
-                    self.page_controls(ui);
-                    if self.peek_spot().is_some() {
-                        ui.add_space(6.0);
-                        self.peek_eye(ui, &ctx);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(full, BAR_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_min_height(BAR_H);
+                        ui.spacing_mut().item_spacing.x = 2.0;
                         ui.add_space(10.0);
-                        self.zoom_controls(ui);
-                    });
-                });
+                        self.page_controls(ui);
+                        if self.peek_spot().is_some() {
+                            ui.add_space(6.0);
+                            self.peek_eye(ui, &ctx);
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(10.0);
+                            self.zoom_controls(ui);
+                        });
+                    },
+                );
             });
     }
 
     fn page_controls(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
         let count = self.page_count();
-        if step_button(ui, "‹", self.page_index > 0).on_hover_text("Previous page (PgUp)").clicked() {
+        if step_button(ui, "‹", self.page_index > 0)
+            .on_hover_text("Previous page (PgUp)")
+            .clicked()
+        {
             self.go_to_page(self.page_index - 1);
         }
         let field = ui.add(
@@ -557,7 +654,10 @@ impl ViewerApp {
         ui.add_space(4.0);
         ui.label(RichText::new(format!("of {count}")).color(p.muted));
         ui.add_space(2.0);
-        if step_button(ui, "›", self.page_index + 1 < count).on_hover_text("Next page (PgDn)").clicked() {
+        if step_button(ui, "›", self.page_index + 1 < count)
+            .on_hover_text("Next page (PgDn)")
+            .clicked()
+        {
             self.go_to_page(self.page_index + 1);
         }
     }
@@ -568,17 +668,25 @@ impl ViewerApp {
         let away = self.peek.away();
         let peeking = self.peek.peeking();
         let tint = if away || peeking { p.accent } else { p.ink };
-        let kind = if peeking { w::Kind::Selected } else { w::Kind::Quiet };
+        let kind = if peeking {
+            w::Kind::Selected
+        } else {
+            w::Kind::Quiet
+        };
         let resp = w::button(
             ui,
-            RichText::new(if away { "↩" } else { "👁" }).size(16.0).color(tint),
-            w::Btn::new(kind).min(32.0, 32.0).sense(Sense::click_and_drag()),
+            RichText::new(if away { "↩" } else { "👁" })
+                .size(16.0)
+                .color(tint),
+            w::Btn::new(kind)
+                .min(32.0, 32.0)
+                .sense(Sense::click_and_drag()),
         )
-            .on_hover_text(if away {
-                "Back to where you were (Q)"
-            } else {
-                "Peek — hold to look, click to jump there (hold Q / tap Q)"
-            });
+        .on_hover_text(if away {
+            "Back to where you were (Q)"
+        } else {
+            "Peek — hold to look, click to jump there (hold Q / tap Q)"
+        });
         let down = resp.is_pointer_button_down_on();
         self.peek_button(ctx, down);
     }
@@ -587,7 +695,10 @@ impl ViewerApp {
         let p = w::pal(ui);
         // Right-to-left: the first added sits furthest right. Every control is
         // the same height, the glyph buttons square, so the row lines up.
-        if step_button(ui, "+", true).on_hover_text("Zoom in (Ctrl+=)").clicked() {
+        if step_button(ui, "+", true)
+            .on_hover_text("Zoom in (Ctrl+=)")
+            .clicked()
+        {
             self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
         }
         let pct = RichText::new(format!("{:.0}%", self.effective_zoom * 100.0)).color(p.muted);
@@ -597,20 +708,33 @@ impl ViewerApp {
         {
             self.change_zoom(Zoom::Custom(1.0), None);
         }
-        if step_button(ui, "−", true).on_hover_text("Zoom out (Ctrl+-)").clicked() {
+        if step_button(ui, "−", true)
+            .on_hover_text("Zoom out (Ctrl+-)")
+            .clicked()
+        {
             self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
         }
         ui.add_space(14.0);
         let fit = |ui: &mut egui::Ui, label: &str, on: bool| {
-            let kind = if on { w::Kind::Selected } else { w::Kind::Quiet };
+            let kind = if on {
+                w::Kind::Selected
+            } else {
+                w::Kind::Quiet
+            };
             let rt = RichText::new(label);
             let rt = if on { rt.family(theme::medium()) } else { rt };
             w::button(ui, rt, w::Btn::new(kind).min(60.0, 32.0))
         };
-        if fit(ui, "Width", self.zoom == Zoom::FitWidth).on_hover_text("Fit the page width").clicked() {
+        if fit(ui, "Width", self.zoom == Zoom::FitWidth)
+            .on_hover_text("Fit the page width")
+            .clicked()
+        {
             self.change_zoom(Zoom::FitWidth, None);
         }
-        if fit(ui, "Fit", self.zoom == Zoom::FitPage).on_hover_text("Fit the whole page").clicked() {
+        if fit(ui, "Fit", self.zoom == Zoom::FitPage)
+            .on_hover_text("Fit the whole page")
+            .clicked()
+        {
             self.change_zoom(Zoom::FitPage, None);
         }
     }
@@ -624,7 +748,11 @@ impl ViewerApp {
         if open {
             self.sidebar_last = self.sidebar;
         }
-        let shown = if open { self.sidebar } else { self.sidebar_last };
+        let shown = if open {
+            self.sidebar
+        } else {
+            self.sidebar_last
+        };
         egui::Panel::left("sidebar")
             .exact_size(236.0)
             .resizable(false)
@@ -633,16 +761,24 @@ impl ViewerApp {
             .show_collapsible(ui, &mut open, |ui| {
                 // Vertical hairline on the panel's right edge.
                 let r = ui.max_rect();
-                ui.painter().vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, p.hairline));
+                ui.painter()
+                    .vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, p.hairline));
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        let labels: &[&str] =
-                            if self.toc.is_empty() { &["Pages"] } else { &["Pages", "Contents"] };
+                        let labels: &[&str] = if self.toc.is_empty() {
+                            &["Pages"]
+                        } else {
+                            &["Pages", "Contents"]
+                        };
                         let sel = usize::from(shown == SidebarMode::Toc);
                         if let Some(i) = w::text_tabs(ui, labels, sel) {
-                            self.sidebar = if i == 1 { SidebarMode::Toc } else { SidebarMode::Thumbs };
+                            self.sidebar = if i == 1 {
+                                SidebarMode::Toc
+                            } else {
+                                SidebarMode::Thumbs
+                            };
                         }
                     });
                 });
@@ -714,7 +850,9 @@ impl ViewerApp {
                             .inner_margin(egui::Margin::symmetric(16, 9))
                             .show(ui, |ui| {
                                 ui.set_max_width(520.0);
-                                ui.add(egui::Label::new(RichText::new(msg).color(p.background)).wrap());
+                                ui.add(
+                                    egui::Label::new(RichText::new(msg).color(p.background)).wrap(),
+                                );
                             });
                     });
                 if alpha < 1.0 {
@@ -746,7 +884,11 @@ fn tab_item(
     const CLOSE: f32 = 20.0;
     const LIFT: f32 = 7.0;
     let rt = RichText::new(title);
-    let rt = if active { rt.family(theme::medium()) } else { rt };
+    let rt = if active {
+        rt.family(theme::medium())
+    } else {
+        rt
+    };
     let galley = egui::WidgetText::from(rt).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
@@ -761,10 +903,15 @@ fn tab_item(
     let resp = ui.interact(rect, ui.id().with(("tab", title, path)), Sense::click());
 
     let hover = w::hover_t(ui, &resp, !active);
-    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, w::HOVER_FADE);
+    let on = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("on"), active, w::HOVER_FADE);
     let painter = ui
         .ctx()
-        .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("tab-cards")))
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("tab-cards"),
+        ))
         .with_clip_rect(ui.clip_rect().expand2(egui::vec2(0.0, 2.0)));
 
     // The card: from a little below the top of the band down over the rule.
@@ -772,7 +919,12 @@ fn tab_item(
         egui::pos2(rect.left(), rect.top() + LIFT),
         egui::pos2(rect.right(), rect.bottom() + 1.0),
     );
-    let corners = egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
+    let corners = egui::CornerRadius {
+        nw: 6,
+        ne: 6,
+        sw: 0,
+        se: 0,
+    };
     if on > 0.0 {
         painter.rect(
             card,
@@ -802,7 +954,9 @@ fn tab_item(
         );
     }
 
-    let text_color = p.muted.lerp_to_gamma(p.ink, hover.max(on).max(if closable { 0.7 } else { 0.0 }));
+    let text_color = p
+        .muted
+        .lerp_to_gamma(p.ink, hover.max(on).max(if closable { 0.7 } else { 0.0 }));
     let text_pos = egui::pos2(rect.left() + PAD, card.center().y - galley.size().y * 0.5);
     painter.galley(text_pos, galley, text_color);
 
@@ -864,8 +1018,10 @@ fn paint_win_glyph(
         }
         WinBtn::Maximize if maximized => {
             // Restore: two overlapping squares.
-            let back = egui::Rect::from_center_size(c + egui::vec2(1.5, -1.5), egui::vec2(8.0, 8.0));
-            let front = egui::Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 8.0));
+            let back =
+                egui::Rect::from_center_size(c + egui::vec2(1.5, -1.5), egui::vec2(8.0, 8.0));
+            let front =
+                egui::Rect::from_center_size(c + egui::vec2(-1.5, 1.5), egui::vec2(8.0, 8.0));
             painter.rect_stroke(back, 1, s, egui::StrokeKind::Middle);
             painter.rect_filled(front, 1, behind);
             painter.rect_stroke(front, 1, s, egui::StrokeKind::Middle);

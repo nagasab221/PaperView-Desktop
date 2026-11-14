@@ -36,9 +36,19 @@ struct LayoutKey {
 
 enum Item {
     /// Rows `rows` of block `block`'s layout, drawn with their top at `y`.
-    Text { block: usize, rows: std::ops::Range<usize>, y: f32 },
-    Image { id: usize, y: f32, size: Vec2 },
-    Rule { y: f32 },
+    Text {
+        block: usize,
+        rows: std::ops::Range<usize>,
+        y: f32,
+    },
+    Image {
+        id: usize,
+        y: f32,
+        size: Vec2,
+    },
+    Rule {
+        y: f32,
+    },
 }
 
 struct Page {
@@ -96,7 +106,10 @@ impl BookView {
         let (decode_tx, decode_rx) = channel();
         BookView {
             path: path.to_path_buf(),
-            title: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            title: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             loaded: Loaded::Loading(rx),
             mark,
             spread,
@@ -135,7 +148,11 @@ impl BookView {
     }
 
     fn step(&self) -> usize {
-        if self.spread { 2 } else { 1 }
+        if self.spread {
+            2
+        } else {
+            1
+        }
     }
 
     fn page_count(&self) -> usize {
@@ -153,7 +170,11 @@ impl BookView {
         }
         let a = self.cur + 1;
         let b = (self.cur + self.step()).min(n);
-        let more = if self.done || self.book().is_some_and(|b| b.is_comic()) { "" } else { "+" };
+        let more = if self.done || self.book().is_some_and(|b| b.is_comic()) {
+            ""
+        } else {
+            "+"
+        };
         if b > a {
             format!("{a}–{b} of {n}{more}")
         } else {
@@ -222,7 +243,10 @@ impl BookView {
         if let Some(page) = self.pages.get(self.cur) {
             self.mark = page.start;
         } else if self.book().is_some_and(|b| b.is_comic()) {
-            self.mark = Mark { block: self.cur, chr: 0 };
+            self.mark = Mark {
+                block: self.cur,
+                chr: 0,
+            };
         }
     }
 
@@ -235,7 +259,8 @@ impl BookView {
         }
         let target = self.mark;
         let found = self.pages.iter().rposition(|p| {
-            p.start.block < target.block || (p.start.block == target.block && p.start.chr <= target.chr)
+            p.start.block < target.block
+                || (p.start.block == target.block && p.start.chr <= target.chr)
         });
         let page = found.unwrap_or(0);
         self.cur = page - page % self.step();
@@ -269,7 +294,10 @@ impl BookView {
         let _ = family_base;
         let mut job = egui::text::LayoutJob::default();
         for Run { text, style } in runs {
-            let family = match (style.bold || matches!(block, Block::Heading { .. }), style.italic) {
+            let family = match (
+                style.bold || matches!(block, Block::Heading { .. }),
+                style.italic,
+            ) {
                 (true, true) => FontFamily::Name("serif-bolditalic".into()),
                 (true, false) => FontFamily::Name("serif-bold".into()),
                 (false, true) => FontFamily::Name("serif-italic".into()),
@@ -325,8 +353,17 @@ impl BookView {
     }
 
     /// Lays out more pages, for up to `budget`, or until `until` is placed.
-    fn paginate(&mut self, ctx: &egui::Context, col: Vec2, p: &Palette, budget: Duration, until: Option<usize>) {
-        let Some(book) = self.book().cloned() else { return };
+    fn paginate(
+        &mut self,
+        ctx: &egui::Context,
+        col: Vec2,
+        p: &Palette,
+        budget: Duration,
+        until: Option<usize>,
+    ) {
+        let Some(book) = self.book().cloned() else {
+            return;
+        };
         let Content::Text { blocks, .. } = &book.content else {
             self.done = true;
             return;
@@ -349,7 +386,10 @@ impl BookView {
             match &blocks[i] {
                 Block::PageBreak => {
                     if self.open_page.as_ref().is_some_and(|p| !p.items.is_empty()) {
-                        self.close_page(Mark { block: i + 1, chr: 0 });
+                        self.close_page(Mark {
+                            block: i + 1,
+                            chr: 0,
+                        });
                     }
                 }
                 Block::Rule => {
@@ -357,7 +397,11 @@ impl BookView {
                         self.close_page(Mark { block: i, chr: 0 });
                     }
                     let y = self.used + gap;
-                    self.open_page.get_or_insert_with(|| Page { items: Vec::new(), start: Mark { block: i, chr: 0 } })
+                    self.open_page
+                        .get_or_insert_with(|| Page {
+                            items: Vec::new(),
+                            start: Mark { block: i, chr: 0 },
+                        })
                         .items
                         .push(Item::Rule { y });
                     self.used += gap * 2.0;
@@ -371,18 +415,31 @@ impl BookView {
                         self.close_page(Mark { block: i, chr: 0 });
                     }
                     let y = self.used;
-                    self.open_page.get_or_insert_with(|| Page { items: Vec::new(), start: Mark { block: i, chr: 0 } })
+                    self.open_page
+                        .get_or_insert_with(|| Page {
+                            items: Vec::new(),
+                            start: Mark { block: i, chr: 0 },
+                        })
                         .items
                         .push(Item::Image { id: *id, y, size });
                     self.used += size.y + gap;
                 }
                 block @ (Block::Para { .. } | Block::Heading { .. }) => {
-                    let Some(job) = self.job(block, col.x, p) else { continue };
+                    let Some(job) = self.job(block, col.x, p) else {
+                        continue;
+                    };
                     let galley = ctx.fonts_mut(|f| f.layout_job(job));
                     let heading = matches!(block, Block::Heading { .. });
-                    let before = if heading && self.used > 0.0 { self.font * 1.2 } else { 0.0 };
+                    let before = if heading && self.used > 0.0 {
+                        self.font * 1.2
+                    } else {
+                        0.0
+                    };
                     // Keep a heading with at least two lines of what follows.
-                    if heading && self.used > 0.0 && self.used + before + galley.size().y + self.font * 3.2 > col.y {
+                    if heading
+                        && self.used > 0.0
+                        && self.used + before + galley.size().y + self.font * 3.2 > col.y
+                    {
                         self.close_page(Mark { block: i, chr: 0 });
                     } else {
                         self.used += before;
@@ -400,7 +457,10 @@ impl BookView {
                         if run_start.is_none() {
                             run_start = Some((r, self.used, row.min_y()));
                             if self.open_page.is_none() {
-                                self.open_page = Some(Page { items: Vec::new(), start: Mark { block: i, chr } });
+                                self.open_page = Some(Page {
+                                    items: Vec::new(),
+                                    start: Mark { block: i, chr },
+                                });
                             }
                         }
                         self.used += h;
@@ -425,9 +485,10 @@ impl BookView {
         if rows.is_empty() {
             return;
         }
-        let page = self
-            .open_page
-            .get_or_insert_with(|| Page { items: Vec::new(), start: Mark { block, chr: 0 } });
+        let page = self.open_page.get_or_insert_with(|| Page {
+            items: Vec::new(),
+            start: Mark { block, chr: 0 },
+        });
         page.items.push(Item::Text { block, rows, y });
     }
 
@@ -437,7 +498,10 @@ impl BookView {
                 self.pages.push(page);
             }
         }
-        self.open_page = Some(Page { items: Vec::new(), start: next_start });
+        self.open_page = Some(Page {
+            items: Vec::new(),
+            start: next_start,
+        });
         self.used = 0.0;
     }
 
@@ -489,11 +553,16 @@ impl BookView {
         let avail = area.shrink2(Vec2::new(24.0, 18.0));
         let page_h = avail.height();
         let page_w = if self.spread {
-            ((avail.width() - gutter) / 2.0).min(max_page_w).min(page_h * 0.78)
+            ((avail.width() - gutter) / 2.0)
+                .min(max_page_w)
+                .min(page_h * 0.78)
         } else {
             avail.width().min(max_page_w).min(page_h * 0.85)
         };
-        let col = Vec2::new((page_w - margin.x * 2.0).max(120.0), (page_h - margin.y * 2.0).max(120.0));
+        let col = Vec2::new(
+            (page_w - margin.x * 2.0).max(120.0),
+            (page_h - margin.y * 2.0).max(120.0),
+        );
         let key = LayoutKey {
             col: (col.x.round() as i32, col.y.round() as i32),
             font: (self.font * 10.0).round() as i32,
@@ -504,7 +573,9 @@ impl BookView {
         let is_comic = self.book().is_some_and(|b| b.is_comic());
         if !is_comic && self.key != Some(key) {
             let settle = match self.pending {
-                Some((k, at)) if k == key => at.elapsed() > Duration::from_millis(140) || self.key.is_none(),
+                Some((k, at)) if k == key => {
+                    at.elapsed() > Duration::from_millis(140) || self.key.is_none()
+                }
                 _ => {
                     self.pending = Some((key, Instant::now()));
                     self.key.is_none()
@@ -529,7 +600,9 @@ impl BookView {
 
         // Images decoded in the background.
         while let Ok((id, image)) = self.decode_rx.try_recv() {
-            let tex = image.map(|img| ctx.load_texture(format!("book-img-{id}"), img, egui::TextureOptions::LINEAR));
+            let tex = image.map(|img| {
+                ctx.load_texture(format!("book-img-{id}"), img, egui::TextureOptions::LINEAR)
+            });
             self.textures.insert(id, tex);
         }
 
@@ -540,11 +613,20 @@ impl BookView {
 
         for k in 0..n_pages {
             let index = self.cur + k;
-            let rect = Rect::from_min_size(Pos2::new(left + k as f32 * (page_w + gutter), top), Vec2::new(page_w, page_h));
+            let rect = Rect::from_min_size(
+                Pos2::new(left + k as f32 * (page_w + gutter), top),
+                Vec2::new(page_w, page_h),
+            );
             if index >= self.page_count() {
                 continue;
             }
-            ui.painter().rect(rect, 3, p.surface, Stroke::new(1.0, p.hairline), egui::StrokeKind::Outside);
+            ui.painter().rect(
+                rect,
+                3,
+                p.surface,
+                Stroke::new(1.0, p.hairline),
+                egui::StrokeKind::Outside,
+            );
             if is_comic {
                 self.draw_comic_page(ui, index, rect.shrink(10.0), p);
             } else {
@@ -567,7 +649,9 @@ impl BookView {
         // The wheel turns pages too, one notch at a time.
         if resp.hovered() {
             self.wheel += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-            let cooled = self.last_turn.is_none_or(|t| t.elapsed() > Duration::from_millis(160));
+            let cooled = self
+                .last_turn
+                .is_none_or(|t| t.elapsed() > Duration::from_millis(160));
             if self.wheel.abs() > 40.0 && cooled {
                 if self.wheel < 0.0 {
                     self.next();
@@ -592,8 +676,12 @@ impl BookView {
         col: Vec2,
         p: &Palette,
     ) {
-        let Some(book) = self.book().cloned() else { return };
-        let Content::Text { blocks, images } = &book.content else { return };
+        let Some(book) = self.book().cloned() else {
+            return;
+        };
+        let Content::Text { blocks, images } = &book.content else {
+            return;
+        };
         let origin = rect.min + margin;
         let painter = ui.painter_at(rect);
 
@@ -618,7 +706,9 @@ impl BookView {
             p.muted,
         );
 
-        let Some(page) = self.pages.get(index) else { return };
+        let Some(page) = self.pages.get(index) else {
+            return;
+        };
         // Collect what to draw first (the layout borrows self immutably).
         let mut texts = Vec::new();
         let mut pics = Vec::new();
@@ -631,29 +721,54 @@ impl BookView {
             }
         }
         for (block, rows, y) in texts {
-            let Some(job) = self.job(&blocks[block], col.x, p) else { continue };
+            let Some(job) = self.job(&blocks[block], col.x, p) else {
+                continue;
+            };
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
-            let (Some(first), Some(last)) = (galley.rows.get(rows.start), galley.rows.get(rows.end - 1)) else {
+            let (Some(first), Some(last)) =
+                (galley.rows.get(rows.start), galley.rows.get(rows.end - 1))
+            else {
                 continue;
             };
             let clip = Rect::from_min_max(
                 Pos2::new(rect.left(), origin.y + y - 1.0),
-                Pos2::new(rect.right(), origin.y + y + (last.max_y() - first.min_y()) + 1.0),
+                Pos2::new(
+                    rect.right(),
+                    origin.y + y + (last.max_y() - first.min_y()) + 1.0,
+                ),
             );
             // A centred layout is centred on its origin: start it mid-column.
-            let x = if matches!(blocks[block], Block::Heading { .. }) { origin.x + col.x / 2.0 } else { origin.x };
+            let x = if matches!(blocks[block], Block::Heading { .. }) {
+                origin.x + col.x / 2.0
+            } else {
+                origin.x
+            };
             let pos = Pos2::new(x, origin.y + y - first.min_y());
-            ui.painter().with_clip_rect(clip.intersect(rect)).galley(pos, galley, p.ink);
+            ui.painter()
+                .with_clip_rect(clip.intersect(rect))
+                .galley(pos, galley, p.ink);
         }
         for y in rules {
             let yy = origin.y + y;
-            painter.hline(origin.x + col.x * 0.35..=origin.x + col.x * 0.65, yy, Stroke::new(1.0, p.hairline));
+            painter.hline(
+                origin.x + col.x * 0.35..=origin.x + col.x * 0.65,
+                yy,
+                Stroke::new(1.0, p.hairline),
+            );
         }
         for (id, y, size) in pics {
-            let r = Rect::from_min_size(Pos2::new(origin.x + (col.x - size.x) / 2.0, origin.y + y), size);
+            let r = Rect::from_min_size(
+                Pos2::new(origin.x + (col.x - size.x) / 2.0, origin.y + y),
+                size,
+            );
             match self.textures.get(&id) {
                 Some(Some(tex)) => {
-                    painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
+                    painter.image(
+                        tex.id(),
+                        r,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 }
                 Some(None) => {}
                 None => {
@@ -674,35 +789,58 @@ impl BookView {
     }
 
     fn draw_comic_page(&mut self, ui: &mut egui::Ui, index: usize, rect: Rect, p: &Palette) {
-        let Some(book) = self.book().cloned() else { return };
-        let Content::Comic { pages } = &book.content else { return };
-        let Some(name) = pages.get(index).cloned() else { return };
+        let Some(book) = self.book().cloned() else {
+            return;
+        };
+        let Content::Comic { pages } = &book.content else {
+            return;
+        };
+        let Some(name) = pages.get(index).cloned() else {
+            return;
+        };
         match self.textures.get(&index) {
             Some(Some(tex)) => {
                 let size = tex.size_vec2();
                 let scale = (rect.width() / size.x).min(rect.height() / size.y);
                 let r = Rect::from_center_size(rect.center(), size * scale);
-                ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
+                ui.painter().image(
+                    tex.id(),
+                    r,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
             }
             Some(None) => {}
             None => {
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "…", FontId::proportional(18.0), p.muted);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "…",
+                    FontId::proportional(18.0),
+                    p.muted,
+                );
                 self.textures.insert(index, None);
                 // This page and the next spread's, ahead of time.
                 for i in [index, index + 2, index + 3] {
                     if i != index && self.textures.contains_key(&i) {
                         continue;
                     }
-                    let Some(name) = (if i == index { Some(name.clone()) } else { pages.get(i).cloned() }) else {
+                    let Some(name) = (if i == index {
+                        Some(name.clone())
+                    } else {
+                        pages.get(i).cloned()
+                    }) else {
                         continue;
                     };
                     if i != index {
                         self.textures.insert(i, None);
                     }
-                    let (tx, ctx, path) = (self.decode_tx.clone(), ui.ctx().clone(), self.path.clone());
+                    let (tx, ctx, path) =
+                        (self.decode_tx.clone(), ui.ctx().clone(), self.path.clone());
                     let max_w = (rect.width() * ui.ctx().pixels_per_point() * 1.5) as u32;
                     std::thread::spawn(move || {
-                        let img = ebook::comic_page(&path, &name).and_then(|b| decode_image(&b, max_w));
+                        let img =
+                            ebook::comic_page(&path, &name).and_then(|b| decode_image(&b, max_w));
                         let _ = tx.send((i, img));
                         ctx.request_repaint();
                     });
@@ -713,8 +851,13 @@ impl BookView {
 
     /// The chapter list, for the sidebar.
     pub fn chapters(&self) -> Vec<(String, usize, bool)> {
-        let Some(book) = self.book() else { return Vec::new() };
-        let current = book.chapters.iter().rposition(|c| c.block <= self.mark.block);
+        let Some(book) = self.book() else {
+            return Vec::new();
+        };
+        let current = book
+            .chapters
+            .iter()
+            .rposition(|c| c.block <= self.mark.block);
         book.chapters
             .iter()
             .enumerate()
@@ -737,7 +880,10 @@ fn decode_image(bytes: &[u8], max_w: u32) -> Option<egui::ColorImage> {
         img
     };
     let rgba = img.to_rgba8();
-    Some(egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    ))
 }
 
 /// Titles can carry line breaks ("PRIDE.\nand\nPREJUDICE"): one line please.
@@ -763,8 +909,15 @@ fn centred_note(ui: &mut egui::Ui, area: Rect, p: &Palette, text: &str, spinning
                 c + Vec2::new(a.cos(), a.sin() - 3.0) * 10.0
             })
             .collect();
-        ui.painter().add(egui::Shape::line(pts, Stroke::new(2.0, p.accent)));
+        ui.painter()
+            .add(egui::Shape::line(pts, Stroke::new(2.0, p.accent)));
         ui.ctx().request_repaint();
     }
-    ui.painter().text(c + Vec2::new(0.0, 14.0), egui::Align2::CENTER_TOP, text, FontId::proportional(14.5), p.muted);
+    ui.painter().text(
+        c + Vec2::new(0.0, 14.0),
+        egui::Align2::CENTER_TOP,
+        text,
+        FontId::proportional(14.5),
+        p.muted,
+    );
 }

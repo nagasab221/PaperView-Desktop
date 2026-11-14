@@ -60,7 +60,11 @@ impl PdfEngine {
             let (lib, asset, exe) = if cfg!(target_os = "windows") {
                 ("pdfium.dll", "pdfium-win-x64.tgz", "paperview.exe")
             } else {
-                ("libpdfium.so", "pdfium-linux-x64.tgz", "the paperview program")
+                (
+                    "libpdfium.so",
+                    "pdfium-linux-x64.tgz",
+                    "the paperview program",
+                )
             };
             format!(
                 "Could not load {lib}.\n\n\
@@ -77,9 +81,9 @@ impl PdfEngine {
         let _gate = gate();
         let doc = match self.pdfium.load_pdf_from_file(path, password) {
             Ok(doc) => doc,
-            Err(PdfiumError::PdfiumLibraryInternalError(
-                PdfiumInternalError::PasswordError,
-            )) => return Err(OpenError::PasswordRequired),
+            Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {
+                return Err(OpenError::PasswordRequired)
+            }
             Err(e) => {
                 return Err(OpenError::Message(format!(
                     "Could not open {}: {e:?}",
@@ -93,9 +97,9 @@ impl PdfEngine {
         let mut page_sizes_pt = Vec::with_capacity(count as usize);
         let mut page_origins_pt = Vec::with_capacity(count as usize);
         for index in 0..count {
-            let page = pages
-                .get(index)
-                .map_err(|e| OpenError::Message(format!("Could not read page {}: {e:?}", index + 1)))?;
+            let page = pages.get(index).map_err(|e| {
+                OpenError::Message(format!("Could not read page {}: {e:?}", index + 1))
+            })?;
             let (w, h) = (page.width().value, page.height().value);
             page_sizes_pt.push((w, h));
             // Text/search coordinates are in raw page space; the *displayed*

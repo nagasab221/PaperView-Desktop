@@ -71,7 +71,10 @@ fn header(pdb: &Pdb, base: usize) -> Result<Header, String> {
     let text_records = be16(r0, 8).unwrap_or(0) as usize;
     let encryption = be16(r0, 12).unwrap_or(0);
     if encryption != 0 {
-        return Err("This Kindle book is DRM-protected, so it can't be opened outside the Kindle app.".into());
+        return Err(
+            "This Kindle book is DRM-protected, so it can't be opened outside the Kindle app."
+                .into(),
+        );
     }
     let mut h = Header {
         base,
@@ -87,11 +90,16 @@ fn header(pdb: &Pdb, base: usize) -> Result<Header, String> {
     if r0.get(16..20) == Some(b"MOBI") {
         let hlen = be32(r0, 20).unwrap_or(0) as usize;
         h.utf8 = be32(r0, 28) == Some(65001);
-        h.first_image = be32(r0, 108).filter(|&v| v != 0xFFFF_FFFF && v != 0).map(|v| v as usize);
+        h.first_image = be32(r0, 108)
+            .filter(|&v| v != 0xFFFF_FFFF && v != 0)
+            .map(|v| v as usize);
         if hlen >= 0xE4 {
             h.extra_flags = be16(r0, 242).unwrap_or(0);
         }
-        let (name_off, name_len) = (be32(r0, 84).unwrap_or(0) as usize, be32(r0, 88).unwrap_or(0) as usize);
+        let (name_off, name_len) = (
+            be32(r0, 84).unwrap_or(0) as usize,
+            be32(r0, 88).unwrap_or(0) as usize,
+        );
         if let Some(name) = r0.get(name_off..name_off + name_len) {
             h.title = decode(name, h.utf8);
         }
@@ -102,7 +110,9 @@ fn header(pdb: &Pdb, base: usize) -> Result<Header, String> {
                 let count = be32(r0, at + 8).unwrap_or(0) as usize;
                 let mut p = at + 12;
                 for _ in 0..count {
-                    let (Some(kind), Some(len)) = (be32(r0, p), be32(r0, p + 4)) else { break };
+                    let (Some(kind), Some(len)) = (be32(r0, p), be32(r0, p + 4)) else {
+                        break;
+                    };
                     let len = len as usize;
                     if len < 8 {
                         break;
@@ -206,11 +216,15 @@ fn trailing_size(data: &[u8], flags: u16) -> usize {
 
 fn text(pdb: &Pdb, h: &Header) -> Result<String, String> {
     if h.compression == 17480 {
-        return Err("This Kindle book uses HUFF/CDIC compression, which PaperView can't read yet.".into());
+        return Err(
+            "This Kindle book uses HUFF/CDIC compression, which PaperView can't read yet.".into(),
+        );
     }
     let mut raw = Vec::new();
     for i in 1..=h.text_records {
-        let Some(rec) = pdb.record(h.base + i) else { break };
+        let Some(rec) = pdb.record(h.base + i) else {
+            break;
+        };
         let cut = trailing_size(rec, h.extra_flags);
         let rec = &rec[..rec.len().saturating_sub(cut)];
         match h.compression {
@@ -237,7 +251,10 @@ fn best_header(pdb: &Pdb) -> Result<Header, String> {
 fn image_record(reference: &str, first_image: usize) -> Option<usize> {
     let r = reference.trim();
     let n = if let Some(rest) = r.strip_prefix("kindle:embed:") {
-        let code: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let code: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         usize::from_str_radix(&code.to_ascii_uppercase(), 32).ok()?
     } else {
         r.trim_start_matches('0').parse::<usize>().ok()?
@@ -293,7 +310,14 @@ mod tests {
         // 0xE1 is " a" (space + 0x61).
         // distance 3 in the high bits, length 3 (stored as length − 3 = 0) in the low.
         let pair: u16 = 3 << 3;
-        let enc = [b'a', b'b', b'c', 0x80 | (pair >> 8) as u8, (pair & 0xFF) as u8, 0xE1];
+        let enc = [
+            b'a',
+            b'b',
+            b'c',
+            0x80 | (pair >> 8) as u8,
+            (pair & 0xFF) as u8,
+            0xE1,
+        ];
         assert_eq!(palmdoc(&enc), b"abcabc a");
         // 0x02 copies the next two bytes verbatim.
         assert_eq!(palmdoc(&[0x02, 0xC0, 0xC1, b'!']), [0xC0, 0xC1, b'!']);
@@ -302,7 +326,10 @@ mod tests {
     #[test]
     fn image_references() {
         assert_eq!(image_record("00003", 100), Some(102));
-        assert_eq!(image_record("kindle:embed:000A?mime=image/jpg", 100), Some(109));
+        assert_eq!(
+            image_record("kindle:embed:000A?mime=image/jpg", 100),
+            Some(109)
+        );
         assert_eq!(image_record("0", 100), None);
     }
 }

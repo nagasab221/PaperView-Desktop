@@ -9,7 +9,11 @@ fn real_books_open() {
         eprintln!("PAPERVIEW_TEST_BOOKS not set; skipping");
         return;
     };
-    let mut paths: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
     paths.sort();
     for path in paths.iter().filter(|p| ebook::is_ebook(p)) {
         let t = std::time::Instant::now();
@@ -27,7 +31,9 @@ fn real_books_open() {
                     })
                     .sum();
                 let first = blocks.iter().find_map(|b| match b {
-                    Block::Para { runs } => Some(runs.iter().map(|r| r.text.as_str()).collect::<String>()),
+                    Block::Para { runs } => {
+                        Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                    }
                     _ => None,
                 });
                 eprintln!(

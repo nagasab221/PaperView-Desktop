@@ -163,7 +163,11 @@ impl ViewerApp {
         Some(PeekSpot {
             page,
             y_frac: (off.y - rect.min.y) / rect.height().max(1.0),
-            x_frac: if content_w > 0.0 { off.x / content_w } else { 0.0 },
+            x_frac: if content_w > 0.0 {
+                off.x / content_w
+            } else {
+                0.0
+            },
             zoom: self.zoom,
         })
     }
@@ -230,7 +234,10 @@ impl ViewerApp {
         };
         if let Some(back) = self.peek.away_from.take() {
             self.restore(back);
-            let quick = self.peek.jumped_at.is_some_and(|t| t.elapsed() < QUICK_RETURN);
+            let quick = self
+                .peek
+                .jumped_at
+                .is_some_and(|t| t.elapsed() < QUICK_RETURN);
             if quick && self.peek.tips_shown < TIP_LIMIT {
                 self.peek.tips_shown += 1;
                 self.toast("Tip: hold Q (or the eye) to peek — let go and you're right back.");
@@ -311,7 +318,6 @@ impl ViewerApp {
             (None, false) => {}
         }
     }
-
 }
 
 #[cfg(test)]
@@ -324,11 +330,21 @@ mod tests {
         let mut spots = HashMap::new();
         spots.insert(
             PathBuf::from("/home/me/Answers & keys.pdf"),
-            PeekSpot { page: 41, y_frac: 0.62, x_frac: 0.0, zoom: Zoom::FitWidth },
+            PeekSpot {
+                page: 41,
+                y_frac: 0.62,
+                x_frac: 0.0,
+                zoom: Zoom::FitWidth,
+            },
         );
         spots.insert(
             PathBuf::from("/tmp/b.pdf"),
-            PeekSpot { page: 0, y_frac: -0.01, x_frac: 0.25, zoom: Zoom::Custom(2.5) },
+            PeekSpot {
+                page: 0,
+                y_frac: -0.01,
+                x_frac: 0.25,
+                zoom: Zoom::Custom(2.5),
+            },
         );
         assert_eq!(decode_spots(&encode_spots(&spots)), spots);
     }

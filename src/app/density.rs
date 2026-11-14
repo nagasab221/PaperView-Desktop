@@ -20,8 +20,11 @@ pub(super) enum LibraryLayout {
 }
 
 impl LibraryLayout {
-    pub const ALL: [LibraryLayout; 3] =
-        [LibraryLayout::Covers, LibraryLayout::SmallCovers, LibraryLayout::List];
+    pub const ALL: [LibraryLayout; 3] = [
+        LibraryLayout::Covers,
+        LibraryLayout::SmallCovers,
+        LibraryLayout::List,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -82,7 +85,9 @@ impl ViewerApp {
                     .family(theme::medium())
                     .color(p.ink),
             );
-            if (self.ui_scale_draft - 1.0).abs() > 0.001 && w::inline_button(ui, "Reset", true).clicked() {
+            if (self.ui_scale_draft - 1.0).abs() > 0.001
+                && w::inline_button(ui, "Reset", true).clicked()
+            {
                 self.ui_scale_draft = 1.0;
             }
             if slider.dragged() {
@@ -107,8 +112,16 @@ impl ViewerApp {
             ui.spacing_mut().item_spacing.x = 6.0;
             for layout in LibraryLayout::ALL {
                 let on = layout == self.library_layout;
-                let kind = if on { w::Kind::Primary } else { w::Kind::Outlined };
-                let resp = w::button(ui, layout.label(), w::Btn::new(kind).radius(14).min(96.0, 28.0));
+                let kind = if on {
+                    w::Kind::Primary
+                } else {
+                    w::Kind::Outlined
+                };
+                let resp = w::button(
+                    ui,
+                    layout.label(),
+                    w::Btn::new(kind).radius(14).min(96.0, 28.0),
+                );
                 if resp.clicked() {
                     self.library_layout = layout;
                 }
@@ -147,7 +160,9 @@ impl ViewerApp {
         let card = Vec2::new(300.0, 214.0);
         let mut pos = pv.anchor + Vec2::new(28.0, -card.y * 0.5);
         pos.x = pos.x.min(screen.right() - card.x - 12.0);
-        pos.y = pos.y.clamp(screen.top() + 12.0, screen.bottom() - card.y - 12.0);
+        pos.y = pos
+            .y
+            .clamp(screen.top() + 12.0, screen.bottom() - card.y - 12.0);
 
         egui::Area::new(egui::Id::new("density-preview-card"))
             .fixed_pos(pos)
@@ -169,13 +184,18 @@ impl ViewerApp {
                                     .color(p.muted),
                             );
                             ui.label(
-                                RichText::new(format!("{:.0}% · {}", pv.scale * 100.0, pv.layout.label()))
-                                    .small()
-                                    .color(p.muted),
+                                RichText::new(format!(
+                                    "{:.0}% · {}",
+                                    pv.scale * 100.0,
+                                    pv.layout.label()
+                                ))
+                                .small()
+                                .color(p.muted),
                             );
                         });
                         ui.add_space(4.0);
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(280.0, 172.0), egui::Sense::hover());
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::new(280.0, 172.0), egui::Sense::hover());
                         paint_mock(&ui.painter_at(rect), rect, ratio, pv.layout, p);
                     });
             });
@@ -206,32 +226,74 @@ fn paint_mock(painter: &egui::Painter, rect: Rect, ratio: f32, layout: LibraryLa
         p.ink,
     );
     for i in 0..3 {
-        let c = Pos2::new(rect.right() - (22.0 + 44.0 * i as f32) * k, o.y + title_h * 0.5);
+        let c = Pos2::new(
+            rect.right() - (22.0 + 44.0 * i as f32) * k,
+            o.y + title_h * 0.5,
+        );
         painter.circle_filled(c, 2.2 * k.max(0.5), p.muted);
     }
 
     // Heading, subtitle and the primary button.
-    painter.text(at(24.0, 56.0), Align2::LEFT_TOP, "Library", FontId::new(30.0 * k, theme::serif()), p.ink);
-    painter.text(at(24.0, 96.0), Align2::LEFT_TOP, "12 documents", FontId::new(12.0 * k, egui::FontFamily::Proportional), p.muted);
-    let btn = Rect::from_min_size(Pos2::new(rect.right() - 130.0 * k, o.y + 60.0 * k), Vec2::new(100.0 * k, 32.0 * k));
+    painter.text(
+        at(24.0, 56.0),
+        Align2::LEFT_TOP,
+        "Library",
+        FontId::new(30.0 * k, theme::serif()),
+        p.ink,
+    );
+    painter.text(
+        at(24.0, 96.0),
+        Align2::LEFT_TOP,
+        "12 documents",
+        FontId::new(12.0 * k, egui::FontFamily::Proportional),
+        p.muted,
+    );
+    let btn = Rect::from_min_size(
+        Pos2::new(rect.right() - 130.0 * k, o.y + 60.0 * k),
+        Vec2::new(100.0 * k, 32.0 * k),
+    );
     if btn.left() > o.x + 150.0 * k {
         painter.rect_filled(btn, 4.0 * k, p.accent);
     }
 
     // Tabs.
     let tabs_y = 128.0;
-    painter.text(at(24.0, tabs_y), Align2::LEFT_TOP, "Recents", FontId::new(14.5 * k, theme::medium()), p.accent);
-    painter.text(at(100.0, tabs_y), Align2::LEFT_TOP, "Folders", FontId::new(14.5 * k, theme::medium()), p.muted);
+    painter.text(
+        at(24.0, tabs_y),
+        Align2::LEFT_TOP,
+        "Recents",
+        FontId::new(14.5 * k, theme::medium()),
+        p.accent,
+    );
+    painter.text(
+        at(100.0, tabs_y),
+        Align2::LEFT_TOP,
+        "Folders",
+        FontId::new(14.5 * k, theme::medium()),
+        p.muted,
+    );
     let rule_y = o.y + (tabs_y + 26.0) * k;
-    painter.hline(o.x + 24.0 * k..=o.x + 80.0 * k, rule_y - 1.0, Stroke::new(2.0 * k.max(0.5), p.accent));
-    painter.hline(o.x + 24.0 * k..=rect.right() - 24.0 * k, rule_y, Stroke::new(1.0, p.hairline));
+    painter.hline(
+        o.x + 24.0 * k..=o.x + 80.0 * k,
+        rule_y - 1.0,
+        Stroke::new(2.0 * k.max(0.5), p.accent),
+    );
+    painter.hline(
+        o.x + 24.0 * k..=rect.right() - 24.0 * k,
+        rule_y,
+        Stroke::new(1.0, p.hairline),
+    );
 
     // The shelf.
     let top = tabs_y + 48.0;
     let left = 24.0;
     let usable = rect.width() / k - 48.0;
     let line = |x: f32, y: f32, w: f32, c: Color32| {
-        painter.hline(o.x + x * k..=o.x + (x + w) * k, o.y + y * k, Stroke::new((3.0 * k).max(1.0), c));
+        painter.hline(
+            o.x + x * k..=o.x + (x + w) * k,
+            o.y + y * k,
+            Stroke::new((3.0 * k).max(1.0), c),
+        );
     };
     match layout {
         LibraryLayout::List => {
@@ -243,11 +305,21 @@ fn paint_mock(painter: &egui::Painter, rect: Rect, ratio: f32, layout: LibraryLa
                 }
                 let thumb = Rect::from_min_size(at(left, y + 6.0), Vec2::new(34.0 * k, 44.0 * k));
                 painter.rect_filled(thumb, 1, Color32::WHITE);
-                painter.rect_stroke(thumb, 1, Stroke::new(1.0, p.hairline), egui::StrokeKind::Outside);
+                painter.rect_stroke(
+                    thumb,
+                    1,
+                    Stroke::new(1.0, p.hairline),
+                    egui::StrokeKind::Outside,
+                );
                 painter.text(
                     at(left + 48.0, y + 12.0),
                     Align2::LEFT_TOP,
-                    ["Anatomy notes", "Pharmacology", "Answer key", "Biochem week 2"][i % 4],
+                    [
+                        "Anatomy notes",
+                        "Pharmacology",
+                        "Answer key",
+                        "Biochem week 2",
+                    ][i % 4],
                     FontId::new(14.5 * k, egui::FontFamily::Proportional),
                     p.ink,
                 );
@@ -260,7 +332,11 @@ fn paint_mock(painter: &egui::Painter, rect: Rect, ratio: f32, layout: LibraryLa
             }
         }
         _ => {
-            let (tile_w, gap) = if layout == LibraryLayout::SmallCovers { (110.0, 18.0) } else { (150.0, 24.0) };
+            let (tile_w, gap) = if layout == LibraryLayout::SmallCovers {
+                (110.0, 18.0)
+            } else {
+                (150.0, 24.0)
+            };
             let cols = (((usable + gap) / (tile_w + gap)).floor() as usize).max(1);
             let tile_h = tile_w / 0.77;
             for row in 0..3 {
@@ -272,11 +348,26 @@ fn paint_mock(painter: &egui::Painter, rect: Rect, ratio: f32, layout: LibraryLa
                     }
                     let cover = Rect::from_min_size(at(x, y), Vec2::new(tile_w * k, tile_h * k));
                     painter.rect_filled(cover, 0, Color32::WHITE);
-                    painter.rect_stroke(cover, 0, Stroke::new(1.0, p.hairline), egui::StrokeKind::Outside);
+                    painter.rect_stroke(
+                        cover,
+                        0,
+                        Stroke::new(1.0, p.hairline),
+                        egui::StrokeKind::Outside,
+                    );
                     // A suggestion of a page: a heading bar and lines of text.
-                    line(x + 14.0, y + 22.0, tile_w * 0.55, p.muted.gamma_multiply(0.7));
+                    line(
+                        x + 14.0,
+                        y + 22.0,
+                        tile_w * 0.55,
+                        p.muted.gamma_multiply(0.7),
+                    );
                     for l in 0..5 {
-                        line(x + 14.0, y + 42.0 + l as f32 * 12.0, tile_w - 28.0, p.hairline);
+                        line(
+                            x + 14.0,
+                            y + 42.0 + l as f32 * 12.0,
+                            tile_w - 28.0,
+                            p.hairline,
+                        );
                     }
                     painter.text(
                         at(x, y + tile_h + 8.0),

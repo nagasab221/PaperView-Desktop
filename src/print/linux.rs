@@ -34,7 +34,9 @@ const DPI: i32 = 300;
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn have_cups() -> bool {
@@ -44,9 +46,10 @@ fn have_cups() -> bool {
 /// Paper size of a printer's default media: (width, height) in device px.
 fn paper_for(printer: &str) -> (i32, i32) {
     let opts = run("lpoptions", &["-p", printer]).unwrap_or_default();
-    let letter = opts
-        .split_whitespace()
-        .any(|o| (o.starts_with("PageSize=") || o.starts_with("media=")) && o.to_ascii_lowercase().contains("letter"));
+    let letter = opts.split_whitespace().any(|o| {
+        (o.starts_with("PageSize=") || o.starts_with("media="))
+            && o.to_ascii_lowercase().contains("letter")
+    });
     if letter {
         (2550, 3300) // 8.5 × 11 in
     } else {
@@ -58,10 +61,12 @@ fn paper_for(printer: &str) -> (i32, i32) {
 /// cancel — the preview is where the choice happens).
 pub fn show_dialog(_owner: isize, page_count: i32) -> Result<Option<PrintTicket>, String> {
     if !have_cups() {
-        return Err("Printing needs CUPS, the Linux printing system. Install it (on Arch/CachyOS: \
+        return Err(
+            "Printing needs CUPS, the Linux printing system. Install it (on Arch/CachyOS: \
                     sudo pacman -S cups, then sudo systemctl enable --now cups) and add your \
                     printer in System Settings > Printers."
-            .into());
+                .into(),
+        );
     }
     let printers: Vec<String> = run("lpstat", &["-e"])
         .unwrap_or_default()
@@ -92,45 +97,54 @@ pub fn show_dialog(_owner: isize, page_count: i32) -> Result<Option<PrintTicket>
 
 /// Printer, copies and range — shown inside the print preview.
 pub fn options_ui(ui: &mut egui::Ui, t: &mut PrintTicket) {
-    egui::Grid::new("print-options").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label("Printer");
-        let before = t.printer;
-        egui::ComboBox::from_id_salt("printer")
-            .selected_text(t.printers[t.printer].as_str())
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                for (i, name) in t.printers.iter().enumerate() {
-                    ui.selectable_value(&mut t.printer, i, name);
-                }
-            });
-        if t.printer != before {
-            let (w, h) = paper_for(&t.printers[t.printer]);
-            t.dev_w = w;
-            t.dev_h = h;
-        }
-        ui.end_row();
-
-        ui.label("Copies");
-        boxed(ui, |ui| ui.add(egui::DragValue::new(&mut t.copies).range(1..=99)));
-        ui.end_row();
-
-        ui.label("Pages");
-        ui.horizontal(|ui| {
-            let last = t.page_count;
-            let mut from = t.from + 1;
-            let mut to = t.to + 1;
-            boxed(ui, |ui| ui.add(egui::DragValue::new(&mut from).range(1..=last)));
-            ui.label("to");
-            boxed(ui, |ui| ui.add(egui::DragValue::new(&mut to).range(1..=last)));
-            if ui.small_button("All").clicked() {
-                from = 1;
-                to = last;
+    egui::Grid::new("print-options")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Printer");
+            let before = t.printer;
+            egui::ComboBox::from_id_salt("printer")
+                .selected_text(t.printers[t.printer].as_str())
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for (i, name) in t.printers.iter().enumerate() {
+                        ui.selectable_value(&mut t.printer, i, name);
+                    }
+                });
+            if t.printer != before {
+                let (w, h) = paper_for(&t.printers[t.printer]);
+                t.dev_w = w;
+                t.dev_h = h;
             }
-            t.from = (from.min(to) - 1).max(0);
-            t.to = (from.max(to) - 1).max(0);
+            ui.end_row();
+
+            ui.label("Copies");
+            boxed(ui, |ui| {
+                ui.add(egui::DragValue::new(&mut t.copies).range(1..=99))
+            });
+            ui.end_row();
+
+            ui.label("Pages");
+            ui.horizontal(|ui| {
+                let last = t.page_count;
+                let mut from = t.from + 1;
+                let mut to = t.to + 1;
+                boxed(ui, |ui| {
+                    ui.add(egui::DragValue::new(&mut from).range(1..=last))
+                });
+                ui.label("to");
+                boxed(ui, |ui| {
+                    ui.add(egui::DragValue::new(&mut to).range(1..=last))
+                });
+                if ui.small_button("All").clicked() {
+                    from = 1;
+                    to = last;
+                }
+                t.from = (from.min(to) - 1).max(0);
+                t.to = (from.max(to) - 1).max(0);
+            });
+            ui.end_row();
         });
-        ui.end_row();
-    });
 }
 
 /// A number box on a hairline frame, so it reads as editable.
