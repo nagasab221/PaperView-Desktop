@@ -13,7 +13,7 @@ The desktop companion to the [PaperView Android app](https://github.com/nagasab2
 - Smooth scrolling, or one page at a time
 - Zoom that stays sharp: fit the page, fit the width, or anything in between
 - Opens right where you left off: same page, same zoom
-- Search the document, select and copy text, and click links to follow them
+- Search the document, select and copy text (the page scrolls along when you drag past its edge or use the wheel), and click links to follow them
 - Contents and page thumbnails in a side panel
 - Opens password-protected PDFs
 
@@ -76,7 +76,7 @@ There's no download yet, so for now PaperView is built from the source. It takes
 1. Create a free account at [backblaze.com](https://www.backblaze.com/cloud-storage) (10 GB free) and make a **private bucket**. Already use the cloud on the phone app? Use the same bucket and key.
 2. In PaperView, open **Settings** (the ⚙ in the Library, or **Ctrl+,**).
 3. Under **Backblaze B2**, enter the **Key ID**, **Application key** and **bucket name**, then click **Save and connect**.
-4. The **Cloud** tab appears in your Library. To upload, open a document and choose ☰ menu → **Save to cloud**, or drop PDFs onto the Cloud tab.
+4. The **Cloud** tab appears in your Library. To upload a PDF, click **☁** at the top of an open PDF, choose ☰ menu → **Save to cloud…**, or right-click it in Recents → **Save to cloud…**. You can rename it first: the name box is already filled with the file's name, so just click **Upload** to keep it. Dropping several PDFs onto the Cloud tab uploads them all under their own names.
 
 Don't want the Cloud tab? Switch it off in Settings.
 

@@ -2,7 +2,7 @@
 //! bucket is set up and switched on, a Cloud page beside it — the same two
 //! tabs as the phone. The Cloud tab doesn't exist until the bucket does.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
@@ -599,10 +599,16 @@ impl ViewerApp {
             if resp.clicked() {
                 open_req = Some(tile.path.clone());
             }
+            let upload_ok = exists && self.can_upload(path);
+            let mut upload = false;
             resp.on_hover_text(path.display().to_string())
                 .context_menu(|ui| {
                     if exists && ui.button("Open").clicked() {
                         open_req = Some(tile.path.clone());
+                        ui.close();
+                    }
+                    if upload_ok && ui.button("Save to cloud…").clicked() {
+                        upload = true;
                         ui.close();
                     }
                     if ui.button("Show in folder").clicked() {
@@ -614,6 +620,9 @@ impl ViewerApp {
                         ui.close();
                     }
                 });
+            if upload {
+                self.ask_upload(ctx, tile.path.clone());
+            }
             w::hairline(ui);
         }
         ui.add_space(12.0);
@@ -717,10 +726,16 @@ impl ViewerApp {
             if resp.clicked() {
                 open = true;
             }
+            let upload_ok = exists && self.can_upload(path);
+            let mut upload = false;
             resp.on_hover_text(path.display().to_string())
                 .context_menu(|ui| {
                     if exists && ui.button("Open").clicked() {
                         open = true;
+                        ui.close();
+                    }
+                    if upload_ok && ui.button("Save to cloud…").clicked() {
+                        upload = true;
                         ui.close();
                     }
                     if ui.button("Show in folder").clicked() {
@@ -732,6 +747,9 @@ impl ViewerApp {
                         ui.close();
                     }
                 });
+            if upload {
+                self.ask_upload(ctx, tile.path.clone());
+            }
 
             ui.add_space(8.0);
             // At most two lines, always two lines' room: every row is the
@@ -790,13 +808,18 @@ impl ViewerApp {
                 .pick_files()
             {
                 let n = paths.len();
-                for path in paths {
-                    self.start_cloud_op(ctx, CloudOp::Upload(path));
+                if n == 1 {
+                    // One file: let it be named first.
+                    self.ask_upload(ctx, paths[0].clone());
+                } else {
+                    for path in paths {
+                        self.start_cloud_op(ctx, CloudOp::upload(path));
+                    }
+                    self.toast(format!(
+                        "Uploading {n} document{}",
+                        if n == 1 { "" } else { "s" }
+                    ));
                 }
-                self.toast(format!(
-                    "Uploading {n} document{}",
-                    if n == 1 { "" } else { "s" }
-                ));
             }
         }
 
@@ -1177,6 +1200,36 @@ impl ViewerApp {
     }
 
     /// Rename and delete confirmations.
+    /// Whether a local PDF can be offered for upload: a bucket is set up,
+    /// and it isn't a copy that came from the bucket in the first place.
+    pub(super) fn can_upload(&self, path: &Path) -> bool {
+        self.cloud_active()
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            && !path.starts_with(cloud::cache_dir())
+    }
+
+    /// Asks what to call a PDF in the bucket, then uploads it.
+    pub(super) fn ask_upload(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if !self.cloud_active() {
+            return;
+        }
+        let draft = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.cloud_dialog = Some(CloudDialog::Upload {
+            path,
+            draft,
+            focus: true,
+        });
+        // The bucket's file list, to warn before replacing a file.
+        if !self.cloud_listed && !self.cloud_busy {
+            self.start_cloud_op(ctx, CloudOp::List);
+        }
+    }
+
     pub(super) fn cloud_dialogs(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.cloud_dialog.take() else {
             return;
@@ -1249,6 +1302,87 @@ impl ViewerApp {
                     self.cloud_dialog = Some(CloudDialog::Rename {
                         name,
                         id,
+                        draft,
+                        focus: false,
+                    });
+                }
+            }
+            CloudDialog::Upload {
+                path,
+                mut draft,
+                focus,
+            } => {
+                let mut done = false;
+                let mut go = false;
+                let wanted = with_pdf_extension(draft.trim());
+                let clash = self.cloud_files.iter().any(|f| f.name == wanted);
+                let valid = !draft.trim().is_empty() && !draft.contains('/');
+                let bucket = self.cloud_cfg.bucket.trim().to_string();
+                let modal = w::modal("cloud-upload", ctx).show(ctx, |ui| {
+                    ui.set_width(440.0);
+                    ui.label(
+                        RichText::new("Save to cloud")
+                            .text_style(theme::headline())
+                            .color(p.ink),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "It's saved under this name in {bucket}, and your phone sees the same name. \
+                             Change it, or just upload."
+                        ))
+                        .color(p.muted),
+                    );
+                    ui.add_space(12.0);
+                    let edit = w::field(ui, &mut draft, "Name", false, 400.0);
+                    if focus {
+                        edit.request_focus();
+                    }
+                    w::select_all_on_focus(ui, &edit, &draft);
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+                        go = true;
+                    }
+                    ui.add_space(2.0);
+                    if draft.contains('/') {
+                        ui.label(
+                            RichText::new("Names can't contain “/”.")
+                                .small()
+                                .color(ui.visuals().error_fg_color),
+                        );
+                    } else if clash {
+                        ui.label(
+                            RichText::new(format!(
+                                "Your bucket already has “{wanted}”. Uploading replaces it."
+                            ))
+                            .small()
+                            .color(p.accent),
+                        );
+                    } else if valid {
+                        ui.label(
+                            RichText::new(format!("Saved as “{wanted}”"))
+                                .small()
+                                .color(p.muted),
+                        );
+                    }
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if clash { "Replace" } else { "Upload" };
+                            if w::primary_button(ui, label, valid).clicked() {
+                                go = true;
+                            }
+                            if w::outlined_button(ui, "Cancel", true).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                });
+                if go {
+                    self.toast(format!("Uploading {wanted} to {bucket}…"));
+                    self.start_cloud_op(ctx, CloudOp::Upload(path, wanted));
+                } else if !done && !modal.should_close() {
+                    self.cloud_dialog = Some(CloudDialog::Upload {
+                        path,
                         draft,
                         focus: false,
                     });
@@ -1344,6 +1478,12 @@ pub(super) enum CloudDialog {
     },
     Delete {
         items: Vec<(String, String)>,
+    },
+    /// Name a local PDF before it's uploaded.
+    Upload {
+        path: PathBuf,
+        draft: String,
+        focus: bool,
     },
 }
 

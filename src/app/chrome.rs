@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align, Align2, Layout, RichText, Sense, Stroke};
 
 use super::{
-    open_file_location, truncate_title, CloudOp, HomeScreen, ScrollTarget, SidebarMode, ViewMode,
-    ViewerApp, Zoom,
+    open_file_location, truncate_title, HomeScreen, ScrollTarget, SidebarMode, ViewMode, ViewerApp,
+    Zoom,
 };
 use crate::ui::{theme, widgets as w};
 
@@ -378,6 +378,14 @@ impl ViewerApp {
                                         SidebarMode::Toc
                                     };
                                 }
+                                // Leftmost of the icons: right-to-left, added last.
+                                let doc_path = self.doc.as_ref().map(|d| d.path.clone());
+                                if let Some(path) = doc_path.filter(|p| self.can_upload(p)) {
+                                    if w::icon_button(ui, "☁", "Save to cloud…", false).clicked()
+                                    {
+                                        self.ask_upload(&ctx, path);
+                                    }
+                                }
                             }
                         });
                     },
@@ -608,12 +616,12 @@ impl ViewerApp {
                     }
                     ui.close();
                 }
-                if self.cloud_active() && ui.add(item("Save to cloud", "")).clicked() {
-                    if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
-                        self.start_cloud_op(ctx, CloudOp::Upload(path));
-                        self.toast(format!("Uploading to {}", self.cloud_cfg.bucket.trim()));
+                let doc_path = self.doc.as_ref().map(|d| d.path.clone());
+                if let Some(path) = doc_path.filter(|p| self.can_upload(p)) {
+                    if ui.add(item("Save to cloud…", "")).clicked() {
+                        ui.close();
+                        self.ask_upload(ctx, path);
                     }
-                    ui.close();
                 }
                 ui.separator();
                 if ui.add(item("Close document", "Ctrl+W")).clicked() {

@@ -894,7 +894,7 @@ impl ViewerApp {
             .any(|f| f.name == name && f.size == size);
         if should_auto_save(self.auto_save_mb, size, from_cache, already) {
             self.toast(format!("Saving {name} to your bucket…"));
-            self.start_cloud_op(ctx, CloudOp::Upload(path.to_path_buf()));
+            self.start_cloud_op(ctx, CloudOp::upload(path.to_path_buf()));
         }
     }
 
@@ -1732,13 +1732,20 @@ impl ViewerApp {
                 && self.landing_tab == LandingTab::Saved
                 && self.cloud_active();
             if upload_mode {
-                let mut queued = 0usize;
-                for path in dropped
+                let pdfs: Vec<PathBuf> = dropped
                     .iter()
                     .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
-                {
-                    self.start_cloud_op(ctx, CloudOp::Upload(path.clone()));
-                    queued += 1;
+                    .cloned()
+                    .collect();
+                let mut queued = 0usize;
+                if let [one] = pdfs.as_slice() {
+                    // One file: let it be named first.
+                    self.ask_upload(ctx, one.clone());
+                } else {
+                    for path in pdfs {
+                        self.start_cloud_op(ctx, CloudOp::upload(path));
+                        queued += 1;
+                    }
                 }
                 if queued > 0 {
                     self.cloud_status = Some(format!(
@@ -2392,6 +2399,39 @@ impl ViewerApp {
         scroll
     }
 
+    /// Scrolling while text is being selected. egui's scroll area ignores
+    /// the wheel during any drag, so the wheel is applied here; and dragging
+    /// past the top or bottom edge scrolls on its own, faster the further
+    /// out the pointer is. The selection follows, as the drag continues.
+    fn selection_autoscroll(&mut self, ctx: &egui::Context) {
+        if !self.selecting {
+            return;
+        }
+        let (wheel, pointer, dt) = ctx.input(|i| {
+            (
+                i.smooth_scroll_delta.y,
+                i.pointer.latest_pos(),
+                i.stable_dt.min(0.05),
+            )
+        });
+        let mut delta = -wheel;
+        let view = self.central_rect;
+        if let Some(pos) = pointer {
+            const EDGE: f32 = 28.0;
+            // Points per second: gentle at the edge, quick well past it.
+            let speed = |past: f32| (past.max(0.0) * 14.0).min(2400.0);
+            if pos.y > view.bottom() - EDGE {
+                delta += speed(pos.y - (view.bottom() - EDGE)) * dt;
+            } else if pos.y < view.top() + EDGE {
+                delta -= speed(view.top() + EDGE - pos.y) * dt;
+            }
+        }
+        if delta != 0.0 {
+            self.pending_scroll += delta;
+            ctx.request_repaint();
+        }
+    }
+
     fn continuous_view(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
@@ -2401,6 +2441,7 @@ impl ViewerApp {
             .map(|i| self.display_size(i))
             .collect();
         let layout = view::layout_pages(&sizes_disp, zoom, avail.x);
+        self.selection_autoscroll(&ctx);
         if let Some((was, spot)) = self.resize_anchor {
             if (was - avail).length() > 0.5 && self.scroll_to.is_none() {
                 self.scroll_to = Some(spot);

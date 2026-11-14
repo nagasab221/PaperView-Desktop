@@ -63,7 +63,8 @@ pub enum CloudEvent {
 
 pub enum CloudOp {
     List,
-    Upload(PathBuf),
+    /// A local file, and the name to save it under in the bucket.
+    Upload(PathBuf, String),
     /// (file name, expected size, open after download)
     Download(String, u64, bool),
     /// (file name, file id) pairs to delete.
@@ -71,6 +72,17 @@ pub enum CloudOp {
     /// (current name, file id, new name). B2 has no rename: the file is
     /// copied server-side under the new name, then the old version deleted.
     Rename(String, String, String),
+}
+
+impl CloudOp {
+    /// Uploads a file under its own name.
+    pub fn upload(path: PathBuf) -> CloudOp {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        CloudOp::Upload(path, name)
+    }
 }
 
 /// Where downloaded PDFs live locally.
@@ -135,9 +147,9 @@ pub fn spawn(cfg: B2Config, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
                 Ok(files) => send(CloudEvent::Files(files)),
                 Err(e) => send(CloudEvent::Error(e)),
             },
-            CloudOp::Upload(path) => {
+            CloudOp::Upload(path, name) => {
                 send(CloudEvent::Status("Uploading…".into()));
-                match upload(&session, &path) {
+                match upload(&session, &path, &name) {
                     Ok((name, bytes, secs)) => send(CloudEvent::UploadDone { name, bytes, secs }),
                     Err(e) => send(CloudEvent::Error(e)),
                 }
@@ -348,15 +360,16 @@ fn list(s: &Session) -> Result<Vec<CloudFile>, String> {
     Ok(out)
 }
 
-/// Uploads a file; returns (name, bytes, seconds the transfer itself took).
-fn upload(s: &Session, path: &Path) -> Result<(String, u64, f64), String> {
+/// Uploads a file as `name`; returns (name, bytes, seconds the transfer
+/// itself took).
+fn upload(s: &Session, path: &Path, name: &str) -> Result<(String, u64, f64), String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     let sha = hex(&Sha1::digest(&bytes));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or("File has no name")?;
+    if name.trim().is_empty() {
+        return Err("File has no name".into());
+    }
+    let name = name.to_string();
 
     let body = serde_json::json!({ "bucketId": s.bucket_id });
     let mut resp = agent()
@@ -593,8 +606,7 @@ mod fake {
         };
         match op {
             CloudOp::List => send(CloudEvent::Files(list())),
-            CloudOp::Upload(path) => {
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            CloudOp::Upload(path, name) => {
                 let n = std::fs::copy(&path, dir.join(&name)).unwrap_or(0);
                 send(CloudEvent::UploadDone {
                     name,
