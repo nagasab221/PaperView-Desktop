@@ -1,6 +1,6 @@
 [package]
 name = "paperview"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 description = "PaperView: a lightweight, fast-starting PDF reader for Linux and Windows"
 
@@ -18,10 +18,6 @@ eframe = { version = "0.35", default-features = false, features = [
 rfd = "0.17"
 # Landing page timestamps (already in the tree via pdfium-render).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Backblaze B2 "Saved" tab: blocking HTTP on worker threads — no async runtime.
-# native-tls = Windows Schannel: avoids rustls→ring, which needs a C compiler
-# this machine doesn't have.
-ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
@@ -41,6 +37,17 @@ pdfium-render = { version = "0.9", default-features = false, features = [
     "thread_safe",
     "pdfium_latest",
 ] }
+
+# Backblaze B2 "Cloud" tab: blocking HTTP on worker threads — no async runtime.
+# Windows uses Schannel (native-tls): rustls's `ring` needs a C compiler the
+# Windows build machine doesn't have. Linux uses rustls with Mozilla's roots
+# built in, so the binary doesn't depend on the system's OpenSSL version
+# (libssl.so.3 vs .4 differs between distros).
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 
 [profile.release]
 lto = true

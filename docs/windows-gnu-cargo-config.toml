@@ -1,3 +1,6 @@
+# Template: copy this section into %USERPROFILE%\.cargo\config.toml on a Windows
+# machine that builds with the GNU toolchain, and put your user name in the paths.
+
 # ── GNU-toolchain link setup (this machine has no MSVC) ──────────────────────
 # The windows-* crates use `#[link(kind = "raw-dylib")]`, for which rustc
 # shells out to `dlltool.exe`. Rustup's windows-gnu toolchain bundles a dlltool
@@ -18,6 +21,6 @@
 # MSVC builds never read this section.
 [target.x86_64-pc-windows-gnu]
 rustflags = [
-    "-C", "dlltool=C:/Users/fabri/.cargo/gnu-binutils/dlltool.exe",
-    "-L", "C:/Users/fabri/.cargo/gnu-import-libs",
+    "-C", "dlltool=C:/Users/<you>/.cargo/gnu-binutils/dlltool.exe",
+    "-L", "C:/Users/<you>/.cargo/gnu-import-libs",
 ]

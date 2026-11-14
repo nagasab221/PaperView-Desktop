@@ -161,8 +161,9 @@ enum Done {
     /// On disk (or known to be unreadable); `ok` says which.
     Prepared(Key, bool),
     Failed(Key),
-    /// A background stat: the file's key, or None if it's gone.
-    Stat(PathBuf, Option<Key>),
+    /// A background stat: the file's key, or None if it's missing; and
+    /// whether it's gone for good (its folder is there but it isn't).
+    Stat(PathBuf, Option<Key>, bool),
 }
 
 #[derive(Default)]
@@ -278,6 +279,8 @@ pub struct Covers {
     facts: HashMap<PathBuf, (Option<Key>, std::time::Instant)>,
     stat_pending: HashSet<PathBuf>,
     stat_tx: Option<std::sync::mpsc::Sender<PathBuf>>,
+    /// Files found deleted or renamed since the app last asked.
+    gone: Vec<PathBuf>,
     frame: u64,
 }
 
@@ -300,6 +303,7 @@ impl Covers {
             facts: HashMap::new(),
             stat_pending: HashSet::new(),
             stat_tx: None,
+            gone: Vec::new(),
             frame: 0,
         }
     }
@@ -346,7 +350,11 @@ impl Covers {
                 .spawn(move || {
                     for path in rx {
                         let key = Key::of(&path);
-                        if done.send(Done::Stat(path, key)).is_err() {
+                        // Missing from a folder that's still there: deleted
+                        // or renamed. A missing folder is more likely an
+                        // unplugged drive, and the file may come back.
+                        let gone = key.is_none() && path.parent().is_some_and(|dir| dir.is_dir());
+                        if done.send(Done::Stat(path, key, gone)).is_err() {
                             return;
                         }
                         ctx.request_repaint();
@@ -396,6 +404,18 @@ impl Covers {
                 true
             }
         }
+    }
+
+    /// Files that turned out to be deleted or renamed (their folder is still
+    /// there), since the last call.
+    pub fn take_gone(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.gone)
+    }
+
+    /// Asks about a file in the background, so a deleted one is noticed even
+    /// before its tile is on screen.
+    pub fn check(&mut self, ctx: &egui::Context, path: &Path) {
+        let _ = self.exists(ctx, path);
     }
 
     /// The cover for a tile that is on screen; asks for it if it isn't loaded.
@@ -479,8 +499,11 @@ impl Covers {
                     self.preparing.remove(&key.path);
                     self.prepared.insert(key.path);
                 }
-                Done::Stat(path, key) => {
+                Done::Stat(path, key, gone) => {
                     self.stat_pending.remove(&path);
+                    if gone {
+                        self.gone.push(path.clone());
+                    }
                     self.facts.insert(path, (key, std::time::Instant::now()));
                 }
                 Done::Failed(key) => {

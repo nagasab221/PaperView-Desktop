@@ -102,7 +102,10 @@ struct DocTab {
     back_stack: Vec<i32>,
     fwd_stack: Vec<i32>,
     doc_password: Option<String>,
-    saved_offset: egui::Vec2,
+    /// Where to scroll back to: the offset it was left at, or — for a tab
+    /// parked before its first frame (a restored session) — the jump that
+    /// hadn't happened yet.
+    saved_scroll: ScrollTarget,
 }
 
 /// A tab in the strip. The active tab's state lives inline in `ViewerApp`
@@ -418,6 +421,10 @@ pub struct ViewerApp {
     /// down it, how far across the content): a resize — full screen, a
     /// maximise, a dragged edge — scrolls back to the same spot.
     resize_anchor: Option<(egui::Vec2, ScrollTarget)>,
+    /// The page the thumbnail strip last followed, and the strip's visible
+    /// span (content coordinates).
+    thumbs_follow: Option<i32>,
+    thumbs_view: Option<egui::Rangef>,
     /// Screen rect of the page view last frame (for pointer anchoring).
     central_rect: egui::Rect,
     /// Effective zoom before a pending zoom change, for anchor math.
@@ -578,6 +585,8 @@ impl ViewerApp {
             scroll_to: None,
             last_offset: egui::Vec2::ZERO,
             resize_anchor: None,
+            thumbs_follow: None,
+            thumbs_view: None,
             central_rect: egui::Rect::NOTHING,
             zoom_prev_effective: None,
             zoom_anchor: None,
@@ -1016,7 +1025,10 @@ impl ViewerApp {
             back_stack: std::mem::take(&mut self.back_stack),
             fwd_stack: std::mem::take(&mut self.fwd_stack),
             doc_password: self.doc_password.take(),
-            saved_offset: self.last_offset,
+            saved_scroll: self
+                .scroll_to
+                .take()
+                .unwrap_or(ScrollTarget::Offset(self.last_offset)),
         };
         if let Some(slot) = self.tabs.get_mut(i) {
             slot.state = Some(Box::new(state));
@@ -1066,7 +1078,7 @@ impl ViewerApp {
         self.back_stack = s.back_stack;
         self.fwd_stack = s.fwd_stack;
         self.doc_password = s.doc_password;
-        self.scroll_to = Some(ScrollTarget::Offset(s.saved_offset));
+        self.scroll_to = Some(s.saved_scroll);
         self.page_field = (s.page_index + 1).to_string();
         self.active_tab = Some(i);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
@@ -1580,7 +1592,13 @@ impl ViewerApp {
             out.push_str(&text);
         }
         if !out.is_empty() {
+            let n = out.chars().count();
             ctx.copy_text(out);
+            self.toast(if n == 1 {
+                "Copied 1 character".to_string()
+            } else {
+                format!("Copied {} characters", books::thousands(n))
+            });
         }
     }
 
@@ -1839,7 +1857,11 @@ impl ViewerApp {
             space_back: !typing && i.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
             escape: (search_active || has_selection)
                 && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-            copy: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+            // egui turns Ctrl+C (and Ctrl+Insert) into a Copy event rather
+            // than a key press, so listen for that.
+            copy: !typing
+                && (i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
+                    || i.events.iter().any(|e| matches!(e, egui::Event::Copy))),
             select_all: !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
             save_as: i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
                 || i.consume_key(
@@ -2071,79 +2093,92 @@ impl ViewerApp {
                 }
                 let total = egui::vec2(left + THUMB_W + 8.0, y);
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show_viewport(ui, |ui, viewport| {
-                        ui.set_min_size(total);
-                        let origin = ui.min_rect().min;
-                        let mut keep: HashSet<i32> = HashSet::new();
-                        for (i, &(top, h)) in tops.iter().enumerate() {
-                            if top + h < viewport.min.y - 200.0 {
-                                continue;
-                            }
-                            if top > viewport.max.y + 200.0 {
-                                break;
-                            }
-                            let page = i as i32;
-                            keep.insert(page);
-                            let rect = egui::Rect::from_min_size(
-                                origin + egui::vec2(left, top),
-                                egui::vec2(THUMB_W, h),
+                // Follow the page being read: when it changes and its
+                // thumbnail is out of view, bring it into view.
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if self.thumbs_follow != Some(self.page_index) {
+                    self.thumbs_follow = Some(self.page_index);
+                    if let Some(&(top, h)) = tops.get(self.page_index.max(0) as usize) {
+                        let seen = self
+                            .thumbs_view
+                            .is_some_and(|v| top >= v.min && top + h <= v.max);
+                        if !seen {
+                            area = area.vertical_scroll_offset((top - 40.0).max(0.0));
+                        }
+                    }
+                }
+                let out = area.show_viewport(ui, |ui, viewport| {
+                    ui.set_min_size(total);
+                    let origin = ui.min_rect().min;
+                    let mut keep: HashSet<i32> = HashSet::new();
+                    for (i, &(top, h)) in tops.iter().enumerate() {
+                        if top + h < viewport.min.y - 200.0 {
+                            continue;
+                        }
+                        if top > viewport.max.y + 200.0 {
+                            break;
+                        }
+                        let page = i as i32;
+                        keep.insert(page);
+                        let rect = egui::Rect::from_min_size(
+                            origin + egui::vec2(left, top),
+                            egui::vec2(THUMB_W, h),
+                        );
+                        // Selection ring: a filled accent rect painted under
+                        // the thumbnail (avoids stroke-API churn).
+                        if page == self.page_index {
+                            ui.painter().rect_filled(
+                                rect.expand(3.0),
+                                egui::CornerRadius::same(3),
+                                ui.visuals().selection.bg_fill,
                             );
-                            // Selection ring: a filled accent rect painted under
-                            // the thumbnail (avoids stroke-API churn).
-                            if page == self.page_index {
-                                ui.painter().rect_filled(
-                                    rect.expand(3.0),
-                                    egui::CornerRadius::same(3),
-                                    ui.visuals().selection.bg_fill,
+                        }
+                        match self.thumb_cache.render_into(
+                            &ctx,
+                            self.doc.as_ref().expect("doc checked by caller"),
+                            page,
+                            px_w,
+                            rot,
+                            "thumb",
+                        ) {
+                            Ok((id, tsize)) => {
+                                // Same pixel-grid snap as the main view.
+                                let min = ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
+                                let snapped = egui::Rect::from_min_size(min, tsize / ppp);
+                                ui.painter().image(
+                                    id,
+                                    snapped,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
                                 );
                             }
-                            match self.thumb_cache.render_into(
-                                &ctx,
-                                self.doc.as_ref().expect("doc checked by caller"),
-                                page,
-                                px_w,
-                                rot,
-                                "thumb",
-                            ) {
-                                Ok((id, tsize)) => {
-                                    // Same pixel-grid snap as the main view.
-                                    let min = ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2();
-                                    let snapped = egui::Rect::from_min_size(min, tsize / ppp);
-                                    ui.painter().image(
-                                        id,
-                                        snapped,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(0.0, 0.0),
-                                            egui::pos2(1.0, 1.0),
-                                        ),
-                                        egui::Color32::WHITE,
-                                    );
-                                }
-                                Err(e) => self.status = Some(e),
-                            }
-                            ui.painter().text(
-                                rect.center_bottom() + egui::vec2(0.0, 3.0),
-                                egui::Align2::CENTER_TOP,
-                                (page + 1).to_string(),
-                                egui::FontId::proportional(11.0),
-                                ui.visuals().weak_text_color(),
-                            );
-                            let resp = ui.interact(
-                                rect,
-                                egui::Id::new(("thumb", page)),
-                                egui::Sense::click(),
-                            );
-                            if resp.clicked() {
-                                self.go_to_page(page);
-                            }
+                            Err(e) => self.status = Some(e),
                         }
-                        // Evict thumbs far outside the visible range.
-                        self.thumb_cache.retain(|p, _, r| {
-                            r == rot && (keep.contains(&p) || (p - self.page_index).abs() < 40)
-                        });
+                        ui.painter().text(
+                            rect.center_bottom() + egui::vec2(0.0, 3.0),
+                            egui::Align2::CENTER_TOP,
+                            (page + 1).to_string(),
+                            egui::FontId::proportional(11.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                        let resp =
+                            ui.interact(rect, egui::Id::new(("thumb", page)), egui::Sense::click());
+                        if resp.clicked() {
+                            self.go_to_page(page);
+                        }
+                    }
+                    // Evict thumbs far outside the visible range.
+                    self.thumb_cache.retain(|p, _, r| {
+                        r == rot && (keep.contains(&p) || (p - self.page_index).abs() < 40)
                     });
+                });
+                self.thumbs_view = Some(egui::Rangef::new(
+                    out.state.offset.y,
+                    out.state.offset.y + out.inner_rect.height(),
+                ));
             }
         }
     }
@@ -2717,6 +2752,11 @@ impl eframe::App for ViewerApp {
             ui.set_style(ctx.global_style());
         }
         self.covers.pump(&ctx);
+        // Deleted or renamed files leave Recents and the Books shelf.
+        for path in self.covers.take_gone() {
+            self.recents.retain(|r| !same_path(&r.path, &path));
+            self.books.retain(|b| !same_path(&b.path, &path));
+        }
         self.poll_folder_scan();
         // Interface size: egui scales everything, and pages re-render sharp.
         if (ctx.zoom_factor() - self.ui_scale).abs() > 0.001 {

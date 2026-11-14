@@ -148,6 +148,19 @@ impl ViewerApp {
                         continue;
                     };
                     let action = parts.get(2).copied().unwrap_or("tap");
+                    // Like egui-winit: Ctrl+C / Ctrl+X arrive as Copy / Cut
+                    // events, not as key presses.
+                    if mods.command && action != "up" {
+                        let clip = match key {
+                            Key::C => Some(Event::Copy),
+                            Key::X => Some(Event::Cut),
+                            _ => None,
+                        };
+                        if let Some(ev) = clip {
+                            raw.events.push(ev);
+                            continue;
+                        }
+                    }
                     let mut send = |pressed: bool| {
                         raw.events.push(Event::Key {
                             key,

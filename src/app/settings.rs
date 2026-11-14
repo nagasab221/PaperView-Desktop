@@ -305,11 +305,32 @@ impl ViewerApp {
                 .color(p.ink),
         );
         ui.label(
-            RichText::new("A free PDF reader. No ads, no accounts. Pages are drawn by PDFium.")
-                .color(p.muted),
+            RichText::new(
+                "A free reader for PDFs and ebooks. No ads, no accounts, nothing tracked. \
+                 Pages are drawn by PDFium.",
+            )
+            .color(p.muted),
         );
-        ui.add_space(8.0);
-        ui.label(RichText::new(SHORTCUTS).small().color(p.muted));
+        ui.hyperlink_to(
+            RichText::new("Project page and updates").color(p.accent),
+            "https://github.com/nagasab221/PaperView-Desktop",
+        );
+        ui.add_space(14.0);
+        w::field_label(ui, "Keyboard shortcuts");
+        ui.add_space(4.0);
+        egui::Grid::new("shortcuts")
+            .num_columns(4)
+            .spacing([18.0, 6.0])
+            .show(ui, |ui| {
+                for (i, (keys, what)) in SHORTCUTS.iter().enumerate() {
+                    ui.label(RichText::new(*keys).family(theme::medium()).color(p.ink));
+                    ui.label(RichText::new(*what).color(p.muted));
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        ui.add_space(24.0);
     }
 }
 
@@ -368,10 +389,24 @@ impl ViewerApp {
     }
 }
 
-const SHORTCUTS: &str = "Shortcuts — Ctrl+O open · Ctrl+F find · Ctrl+P print · \
-    Ctrl+W close · Ctrl+Tab next document · Hold Q peek · Tap Q jump to peek spot · \
-    Shift+Q set peek spot · Ctrl+= / Ctrl+- zoom · PgUp / PgDn pages · Ctrl+G go to page · \
-    F11 full screen · Alt+Left back";
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+O", "Open a PDF or ebook"),
+    ("Ctrl+F", "Find in the document"),
+    ("Ctrl+G", "Go to a page"),
+    ("F11", "Full screen (Esc leaves)"),
+    ("Hold Q", "Peek at your saved spot"),
+    ("Tap Q", "Jump to it and back"),
+    ("Shift+Q", "Set the peek spot"),
+    ("Ctrl+= / Ctrl+-", "Zoom, or text size in books"),
+    ("PgUp / PgDn", "Previous / next page"),
+    ("Home / End", "First / last page"),
+    ("Alt+Left", "Back after a link"),
+    ("Ctrl+P", "Print"),
+    ("Ctrl+Tab", "Next document"),
+    ("Ctrl+W", "Close the document"),
+    ("Ctrl+Shift+T", "Reopen a closed document"),
+    ("Ctrl+,", "Settings"),
+];
 
 /// Whitespace pasted around credentials is the usual reason they're rejected.
 struct B2Trimmed;

@@ -174,7 +174,9 @@ The binary lands in `target\release\paperview.exe`; put `pdfium.dll` next to it
 
 This project builds on `stable-x86_64-pc-windows-gnu`, which needs no Visual
 Studio Build Tools. Two machine-setup wrinkles were solved via
-`.cargo/config.toml` (MSVC builds ignore all of it):
+`docs/windows-gnu-cargo-config.toml`, copied into `%USERPROFILE%\.cargo\config.toml`
+(it holds per-machine paths, so it isn't checked in as the project's own config; MSVC
+builds ignore all of it):
 
 1. **dlltool needs an assembler.** The `windows-*` crates use `raw-dylib`
    linking, for which rustc invokes `dlltool.exe`. Rustup bundles a GNU
@@ -306,3 +308,24 @@ build, War and Peace: place found in ~0.2 s, all ~2,700 pages in ~2 s.
 pill (`immersive_controls`) shows for 2.2 s after the pointer moves, and the pointer hides.
 The continuous PDF view now keeps its spot across any resize (`resize_anchor`), which
 full screen made obvious.
+
+## Releases and polish (v0.5)
+
+**Releasing.** Publishing a GitHub release runs `.github/workflows/release.yml`: it builds on
+Ubuntu 22.04 (glibc 2.35, so the binary runs on distros from about 2022 on), runs the tests,
+and attaches `PaperView-linux-x86_64.tar.gz` from `scripts/package-linux.sh` (program,
+PDFium, `install.sh`/`uninstall.sh` from `packaging/linux`, licences). The asset name has no
+version, so `releases/latest/download/…` and the one-line `install.sh` at the repo root
+always get the newest. Linux uses rustls (Mozilla roots built in) instead of OpenSSL, so
+the binary needs nothing beyond glibc and the usual desktop libraries.
+
+**Missing files.** The covers' stat thread reports a file as gone when it's missing but its
+folder exists (deleted or renamed); such files leave Recents and the Books shelf. A missing
+folder usually means an unplugged drive, so those stay, marked "Not available", and can
+still be removed from the right-click menu.
+
+**Ctrl+C.** egui-winit turns Ctrl+C / Ctrl+X into `Event::Copy` / `Event::Cut` instead of
+key presses, so copy listens for the event; the test driver does the same translation.
+
+**Parked tabs** keep a scroll that hadn't happened yet (a restored session's tabs are
+parked before their first frame), so they reopen at their remembered page.

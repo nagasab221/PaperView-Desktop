@@ -248,15 +248,15 @@ struct Session {
     bucket_name: String,
 }
 
-/// HTTP agent using the OS TLS stack (Schannel) — ureq's default provider is
-/// rustls, which isn't compiled in (its `ring` dep needs a C compiler).
+/// HTTP agent: Windows' own TLS stack (Schannel) there; rustls with built-in
+/// root certificates elsewhere, so no particular OpenSSL is needed.
 fn agent() -> ureq::Agent {
+    #[cfg(windows)]
+    let provider = ureq::tls::TlsProvider::NativeTls;
+    #[cfg(not(windows))]
+    let provider = ureq::tls::TlsProvider::Rustls;
     ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .provider(ureq::tls::TlsProvider::NativeTls)
-                .build(),
-        )
+        .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
         .build()
         .into()
 }

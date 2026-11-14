@@ -73,6 +73,16 @@ impl ViewerApp {
             self.activate_tab(ctx, i);
             return;
         }
+        // A user-chosen file, so one quick check is fine here: a book that
+        // isn't there shouldn't land on the shelf.
+        if !path.is_file() {
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.toast(format!("Couldn't find {name}"));
+            return;
+        }
         self.stash_active_tab();
         let mark = self
             .books
@@ -81,10 +91,18 @@ impl ViewerApp {
             .map(|b| b.mark)
             .unwrap_or_default();
         let view = BookView::open(path, mark, self.book_spread, self.reading);
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        // The title the shelf learnt last time, until the book is read again.
+        let name = self
+            .books
+            .iter()
+            .find(|b| same_path(&b.path, path))
+            .map(|b| b.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            });
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — PaperView")));
         self.tabs.push(Tab {
             title: name,
@@ -478,9 +496,16 @@ impl ViewerApp {
                                 },
                             );
                             let color = if *current { p.accent } else { p.ink };
-                            let galley =
-                                ui.painter()
-                                    .layout(title.clone(), font, color, width - 40.0);
+                            // One line, cut with "…": a fixed-height row
+                            // can't take a second line (the full title shows
+                            // on hover).
+                            let mut job = egui::text::LayoutJob::simple_singleline(
+                                title.clone(),
+                                font,
+                                color,
+                            );
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(width - 40.0);
+                            let galley = ui.painter().layout_job(job);
                             let pos = egui::pos2(
                                 rect.left() + 16.0,
                                 rect.center().y - galley.size().y.min(18.0) / 2.0,

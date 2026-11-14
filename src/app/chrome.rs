@@ -624,6 +624,10 @@ impl ViewerApp {
                     }
                 }
                 ui.separator();
+                if ui.add(item("Open a file…", "Ctrl+O")).clicked() {
+                    ui.close();
+                    self.open_dialog(ctx);
+                }
                 if ui.add(item("Close document", "Ctrl+W")).clicked() {
                     ui.close();
                     self.close_doc(ctx);
@@ -676,11 +680,11 @@ impl ViewerApp {
                     self.close_doc(ctx);
                 }
                 ui.separator();
-                if ui.add(item("Open a PDF or book…", "Ctrl+O")).clicked() {
+                if ui.add(item("Open a file…", "Ctrl+O")).clicked() {
                     ui.close();
                     self.open_dialog(ctx);
                 }
-            } else if ui.add(item("Open a PDF or book…", "Ctrl+O")).clicked() {
+            } else if ui.add(item("Open a file…", "Ctrl+O")).clicked() {
                 ui.close();
                 self.open_dialog(ctx);
             }

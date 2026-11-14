@@ -1,114 +1,151 @@
-# PaperView for desktop
+<div align="center">
 
-**A free PDF and ebook reader for your computer. No ads, no accounts.**
+# PaperView
 
-The desktop companion to the [PaperView Android app](https://github.com/nagasab221/Paperview), with the same look and the same cloud. Runs on **Linux** today; a Windows version is coming.
+**A calm, fast reader for your PDFs and ebooks. Free, no ads, no accounts.**
 
----
+[![Latest release](https://img.shields.io/github/v/release/nagasab221/PaperView-Desktop?label=download&color=8a5a2b)](https://github.com/nagasab221/PaperView-Desktop/releases/latest)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-555)](#install)
+[![MIT licence](https://img.shields.io/badge/licence-MIT-555)](LICENSE)
 
-## What it can do
+![PaperView's library: textbooks on a shelf, each showing the page you're on](docs/screenshots/library.png)
 
-### 📖 Comfortable reading
-- Open several documents at once, each in its own tab
-- Smooth scrolling, or one page at a time
-- Zoom that stays sharp: fit the page, fit the width, or anything in between
-- Opens right where you left off: same page, same zoom
-- Search the document, select and copy text (the page scrolls along when you drag past its edge or use the wheel), and click links to follow them
-- Contents and page thumbnails in a side panel
-- Opens password-protected PDFs
+</div>
 
-### 👁 Peek: check the answer key without losing your place
-Made for working through questions while the answers are somewhere else in the document.
+PaperView keeps everything you're reading on one shelf, opens each file right where you left off, and gets out of the way while you read. It's the desktop companion to the [PaperView Android app](https://github.com/nagasab221/Paperview): same look, same cloud. It runs on **Linux** today; a Windows version is on the way.
 
-1. Go to the answer key and press **Shift+Q** (or ☰ menu → **Set peek spot here**).
+## Install
+
+Paste this into a terminal (no root or password needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nagasab221/PaperView-Desktop/main/install.sh | sh
+```
+
+Then open **PaperView** from your app menu. Run the same line again any time to update; your library and settings are kept.
+
+<details>
+<summary>Other ways to install, and how to remove it</summary>
+
+**Download by hand:** get `PaperView-linux-x86_64.tar.gz` from the [latest release](https://github.com/nagasab221/PaperView-Desktop/releases/latest), unpack it and run `./install.sh` inside. You can also run `./paperview` straight from the folder without installing.
+
+**Remove:** `~/.local/opt/paperview/uninstall.sh`. Your library and settings stay in `~/.local/share/paperview`; delete that folder too to forget everything.
+
+**Works on** 64-bit Linux distributions from about 2022 on (Ubuntu 22.04, Debian 12, Fedora 36, Linux Mint 21, Arch and their successors), on Wayland or X11.
+
+**Build from source** (needs [Rust](https://rustup.rs)):
+
+```sh
+git clone https://github.com/nagasab221/PaperView-Desktop.git
+cd PaperView-Desktop
+scripts/fetch-pdfium.sh
+cargo build --release
+scripts/install-linux.sh
+```
+
+**Printing** uses CUPS, the standard Linux printing system. If PaperView says it's missing, install it (Arch: `sudo pacman -S cups && sudo systemctl enable --now cups`; Ubuntu/Debian: `sudo apt install cups`) and add your printer in your system settings.
+
+</details>
+
+## What it does
+
+### 📚 One shelf for everything you read
+
+Every PDF you open lands on the shelf with its cover and the page you're on. Ebooks get their own **Books** tab, showing how far you've read. **Add a folder** (or drop one onto the window) to see every PDF in it, subfolders included. Files you delete or rename leave the shelf by themselves.
+
+![The Books shelf with classic novels and reading progress](docs/screenshots/books.png)
+
+### 📄 PDFs, sharp at any size
+
+Tabs for several documents, smooth scrolling or one page at a time, and zoom that stays crisp: fit the page, fit the width, or anything in between. Search the whole document, select and copy text (**Ctrl+C**), follow links, browse page thumbnails or the table of contents, and jump straight to any page with **Ctrl+G**. Password-protected PDFs and printing work too.
+
+![A calculus textbook open at page 153 with page thumbnails](docs/screenshots/pdf.png)
+
+![Searching a textbook: every match is highlighted](docs/screenshots/search.png)
+
+### 👁 Peek: check the answers without losing your place
+
+Made for working through questions while the answers are at the back of the book.
+
+1. Go to the answer key and press **Shift+Q** to set a peek spot.
 2. **Hold Q** to look at it. Let go and you're back exactly where you were.
 3. **Tap Q** to go there, and tap again to come back.
 
-There's an eye button next to the page number that does the same with the mouse: hold it to peek, click it to jump. Each document remembers its own peek spot, and pressing **Shift+Q** again moves it.
+The eye button in the bottom bar does the same with the mouse. Each document remembers its own peek spot.
 
-### 📕 Ebooks, as an open book
-- Reads **EPUB**, **Kindle** (MOBI, AZW3, AZW, PRC — without DRM), **FB2/FBZ**, **CBZ** comics, plain **TXT** and **HTML**.
-- Two facing pages that meet at the spine like an open book, or one page at a time. Turn pages with the arrow keys, Space, the mouse wheel, or a click on either side.
-- **Go straight to any page**: type it into the page box (or press **Ctrl+G**) and press Enter. Or click anywhere on the thin progress line above the bottom bar.
-- **Aa** in the bottom bar picks the typeface (Noto Serif, Literata, Merriweather, EB Garamond, Lora, Source Serif, Noto Sans, Atkinson Hyperlegible or OpenDyslexic), the text size, line spacing, margins, and book-style indented or spaced paragraphs. The same options, with a sample page, are in Settings → Reading.
-- **Full screen** (F11 or ⛶) shows nothing but the pages. A small bar with the page number appears when you move the mouse.
-- The chapter you're in and how many pages are left in it, a chapter list, and your place remembered in every book.
-- A **Books** tab appears in the Library once you've added a book, with covers and how far you've read.
+### 📖 Ebooks, set like a printed book
 
-### 📚 Your library
-- All your recent PDFs on a shelf, showing their first page and the page you're on.
-- **Add a folder** (or drop one onto the window) and a **Folders** tab shows every PDF in it, subfolders included. Files you add or delete in the folder show up automatically.
-- Right-click a cover to show it in its folder, or to remove it from Recents.
+EPUB, Kindle (MOBI, AZW3, without DRM), FB2, comics (CBZ), plain text and HTML open as two facing pages that meet at the spine, or as one page at a time. Turn pages with the arrow keys, Space, the mouse wheel or a click on either side. The bar shows your chapter and how many pages are left in it, and the thin progress line above it takes you anywhere in the book with one click.
 
-### ☁ Your own cloud (optional)
-Keep documents in your own **Backblaze B2** bucket. It's the same bucket as the phone app, so a PDF saved on one shows up on the other. A **Cloud** tab appears in the Library once it's set up, and nothing uploads unless you ask.
+![Pride and Prejudice open as a two-page spread with an illustration](docs/screenshots/reader.png)
 
-### 🎨 Looks like the phone app, sized how you like
-- Eleven styles, each in light and dark, or following your system: the classic **Paper**, **Slate** and **Ink** (as on the phone), plus a colour for every main hue: **Cherry** (red), **Apricot** (orange), **Saffron** (yellow), **Forest** (green), **Lagoon** (teal), **Cobalt** (blue), **Lavender** (purple) and **Blossom** (pink). Every one keeps text readable (at least 4.5:1 contrast).
-- A **Size** slider in Settings makes everything more compact or easier to read. While you drag it, a small preview shows the result before anything changes.
-- Show the Library as **large covers**, **small covers** or a compact **list**.
+**Aa** picks the typeface (Literata, Merriweather, EB Garamond, Lora, Source Serif, Noto Serif and Sans, Atkinson Hyperlegible and OpenDyslexic), the text size, line spacing, margins, and indented or spaced paragraphs.
 
----
+![The reading options: typefaces, size, spacing, margins, paragraphs](docs/screenshots/reading-options.png)
 
-## Install on Linux
+Press **F11** for full screen with nothing but the pages. A small bar appears when you move the mouse, and **Esc** brings everything back.
 
-There's no download yet, so for now PaperView is built from the source. It takes a few minutes, once.
+![Full screen: just the two pages](docs/screenshots/fullscreen.png)
 
-1. Install Rust from [rustup.rs](https://rustup.rs) (one command, no root needed).
-2. Get PaperView and build it:
-   ```sh
-   git clone https://github.com/nagasab221/PaperView-Desktop.git
-   cd PaperView-Desktop
-   scripts/fetch-pdfium.sh
-   cargo build --release
-   scripts/install-linux.sh
-   ```
-3. Open **PaperView** from your app menu. The first time, it asks whether it should be the app that opens your PDFs and ebooks; you can change that later in **Settings → System**.
+### ☁ Your own cloud, if you want one
 
-**Updating:** `git pull`, `cargo build --release`, then `scripts/install-linux.sh` again. Your library and settings are kept.
+Keep documents in your own private **Backblaze B2** bucket (10 GB free): the same bucket the phone app uses, so a PDF saved on one shows up on the other. Save a PDF with the **☁** button or by right-clicking it in Recents, and rename it on the way if you like. Nothing uploads unless you ask, and none of it appears until you connect a bucket.
 
-**Printing** uses CUPS, the standard Linux printing system. If PaperView says it's missing, install it (on Arch-based systems: `sudo pacman -S cups`, then `sudo systemctl enable --now cups`) and add your printer in your system settings.
+![Saving a PDF to the cloud under a new name](docs/screenshots/cloud.png)
 
----
+<details>
+<summary>Setting up the cloud</summary>
 
-## Set up the cloud
-
-1. Create a free account at [backblaze.com](https://www.backblaze.com/cloud-storage) (10 GB free) and make a **private bucket**. Already use the cloud on the phone app? Use the same bucket and key.
-2. In PaperView, open **Settings** (the ⚙ in the Library, or **Ctrl+,**).
+1. Create a free account at [backblaze.com](https://www.backblaze.com/cloud-storage) and make a **private bucket**. Already use the cloud on the phone app? Use the same bucket and key.
+2. In PaperView, open **Settings** (⚙ in the Library, or **Ctrl+,**).
 3. Under **Backblaze B2**, enter the **Key ID**, **Application key** and **bucket name**, then click **Save and connect**.
-4. The **Cloud** tab appears in your Library. To upload a PDF, click **☁** at the top of an open PDF, choose ☰ menu → **Save to cloud…**, or right-click it in Recents → **Save to cloud…**. You can rename it first: the name box is already filled with the file's name, so just click **Upload** to keep it. Dropping several PDFs onto the Cloud tab uploads them all under their own names.
+4. A **Cloud** tab appears in your Library. Upload with ☁, from the right-click menu, or by dropping PDFs onto the Cloud tab.
 
-Don't want the Cloud tab? Switch it off in Settings.
+</details>
 
----
+### 🎨 Eleven styles, light and dark
+
+Paper, Slate and Ink (as on the phone) plus a style for every main colour: Cherry, Apricot, Saffron, Forest, Lagoon, Cobalt, Lavender and Blossom. Each comes in light and dark, or follows your system, and every one keeps text easy to read. A **Size** slider makes the whole app more compact or larger.
+
+![Settings: eleven styles to choose from](docs/screenshots/settings.png)
+
+<table>
+<tr>
+<td><img src="docs/screenshots/dark-library.png" alt="The library in dark Cobalt"></td>
+<td><img src="docs/screenshots/dark-reader.png" alt="A book in dark Cobalt"></td>
+</tr>
+</table>
 
 ## Keyboard shortcuts
 
 | Keys | Does |
 | --- | --- |
-| **Ctrl+O** | Open a PDF |
+| **Ctrl+O** | Open a PDF or ebook |
 | **Ctrl+F** | Find in the document (Enter for the next match) |
+| **Ctrl+G** | Go to a page |
+| **Ctrl+C** / **Ctrl+A** | Copy the selected text / select all |
+| **F11** / **Esc** | Full screen / leave full screen |
 | **Hold Q** / **Tap Q** | Peek at your saved spot / jump there and back |
 | **Shift+Q** | Set or move the peek spot |
-| **Ctrl+=** / **Ctrl+-** / **Ctrl+0** | Zoom in / out / actual size |
+| **Ctrl+=** / **Ctrl+-** / **Ctrl+0** | Zoom in / out / actual size (text size in books) |
 | **PgUp** / **PgDn**, **Home** / **End** | Previous / next page, first / last page |
+| **← / →**, **Space** | Turn the page in a book |
 | **Alt+Left** / **Alt+Right** | Back / forward after following a link |
 | **Ctrl+Tab** / **Ctrl+W** | Next document / close document |
 | **Ctrl+Shift+T** | Reopen the last closed document |
 | **Ctrl+P** / **Ctrl+S** | Print / save a copy |
-| **Ctrl+G** | Go to a page |
-| **F11** / **Esc** | Full screen / leave full screen |
 | **Ctrl+,** | Settings |
-| **← / →**, **Space**, **PgUp / PgDn** | In a book: previous / next page |
-
----
 
 ## Privacy
 
 - No ads, no analytics, no accounts.
-- Everything works offline. The internet is only used if you set up the cloud, and then only to talk to your own bucket.
+- Everything works offline. The internet is only used if you connect a cloud bucket, and then only to talk to your own bucket.
 - Your Backblaze details are stored only on your computer.
 
----
+## Credits
 
-<sub>For developers: Rust with egui, pages drawn by PDFium. How it all works is in [docs/DEVELOPER_NOTES.md](docs/DEVELOPER_NOTES.md).</sub>
+PaperView is written in Rust with [egui](https://github.com/emilk/egui); pages are drawn by [PDFium](https://pdfium.googlesource.com/pdfium/). The reading typefaces are open-source fonts under the SIL Open Font License. How it all fits together is in [docs/DEVELOPER_NOTES.md](docs/DEVELOPER_NOTES.md).
+
+The screenshots show free textbooks from [OpenStax](https://openstax.org) (CC BY 4.0) and public-domain classics from [Project Gutenberg](https://www.gutenberg.org).
+
+PaperView is released under the [MIT licence](LICENSE).

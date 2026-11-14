@@ -186,7 +186,7 @@ impl ViewerApp {
                 )
             }
             LandingTab::Recent if self.recents.is_empty() => {
-                "Open a PDF with Ctrl+O, or drop a PDF or a folder anywhere in this window"
+                "Open a PDF or an ebook with Ctrl+O, or drop files or a folder anywhere in this window"
                     .to_string()
             }
             LandingTab::Recent => {
@@ -202,8 +202,8 @@ impl ViewerApp {
             if w::icon_button(ui, "⚙", "Settings (Ctrl+,)", false).clicked() {
                 settings = true;
             }
-            if w::primary_button(ui, "Open a PDF", true)
-                .on_hover_text("Ctrl+O")
+            if w::primary_button(ui, "Open a file", true)
+                .on_hover_text("Open a PDF or an ebook (Ctrl+O)")
                 .clicked()
             {
                 open = true;
@@ -265,8 +265,8 @@ impl ViewerApp {
             w::empty_state(
                 ui,
                 "Nothing here yet",
-                "Open a PDF and it appears on this shelf, showing its first page and the page you left off on.",
-                Some(("Open a PDF", &mut open)),
+                "Open a PDF or an ebook and it appears on this shelf, with its cover and the page you left off on.",
+                Some(("Open a file", &mut open)),
             );
             if open {
                 self.open_dialog(ctx);
@@ -274,6 +274,12 @@ impl ViewerApp {
             return;
         }
         ui.add_space(22.0);
+        // Ask about every entry in the background: deleted or renamed files
+        // drop off the shelf by themselves (see ViewerApp::ui).
+        for i in 0..self.recents.len() {
+            let path = self.recents[i].path.clone();
+            self.covers.check(ctx, &path);
+        }
         let tiles: Vec<Tile> = self
             .recents
             .iter()
@@ -287,7 +293,7 @@ impl ViewerApp {
         if let Some(i) = remove {
             self.recents.remove(i);
         }
-        if let Some(p) = open {
+        if let Some(p) = open.filter(|p| self.available(ctx, p)) {
             self.open_path(ctx, &p);
         }
     }
@@ -305,6 +311,10 @@ impl ViewerApp {
             self.pick_books();
         }
         ui.add_space(14.0);
+        for i in 0..self.books.len() {
+            let path = self.books[i].path.clone();
+            self.covers.check(ctx, &path);
+        }
         let tiles: Vec<Tile> = self
             .books
             .iter()
@@ -320,7 +330,7 @@ impl ViewerApp {
                 self.books.remove(i);
             }
         }
-        if let Some(path) = open {
+        if let Some(path) = open.filter(|p| self.available(ctx, p)) {
             self.open_book(ctx, &path);
         }
     }
@@ -461,9 +471,20 @@ impl ViewerApp {
     }
 
     /// The caption under a tile: where you are, if you've read it, else its date.
+    /// Whether a shelf file can be opened; says why not if it can't.
+    fn available(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
+        if self.covers.exists(ctx, path) {
+            return true;
+        }
+        self.toast("That file isn't available. Is its drive connected?");
+        false
+    }
+
     fn caption(&self, tile: &Tile, exists: bool) -> String {
         if !exists {
-            return "File moved or deleted".to_string();
+            // Deleted or renamed files leave the shelf on their own; what's
+            // left is usually on a drive that isn't connected.
+            return "Not available — is its drive connected?".to_string();
         }
         if let Some(b) = self.books.iter().find(|b| same_path(&b.path, &tile.path)) {
             let progress = if b.progress > 0.005 {
@@ -571,14 +592,8 @@ impl ViewerApp {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
             let meta = self.caption(tile, exists);
-            let (resp, thumb) = w::row_lead(
-                ui,
-                exists,
-                egui::vec2(31.0, 40.0),
-                &name,
-                Some(&meta),
-                |_| {},
-            );
+            let (resp, thumb) =
+                w::row_lead(ui, true, egui::vec2(31.0, 40.0), &name, Some(&meta), |_| {});
             // A small first page in the row's leading space.
             if ui.is_rect_visible(thumb) {
                 ui.painter().rect_filled(thumb, 0, p.surface);
@@ -611,7 +626,7 @@ impl ViewerApp {
                         upload = true;
                         ui.close();
                     }
-                    if ui.button("Show in folder").clicked() {
+                    if exists && ui.button("Show in folder").clicked() {
                         open_file_location(path);
                         ui.close();
                     }
@@ -658,14 +673,9 @@ impl ViewerApp {
         ui.vertical(|ui| {
             ui.set_width(tile_w);
             let cover_size = egui::vec2(tile_w, tile_w / COVER_ASPECT);
-            let (slot, resp) = ui.allocate_exact_size(
-                cover_size,
-                if exists {
-                    Sense::click()
-                } else {
-                    Sense::hover()
-                },
-            );
+            // Clickable even when unavailable: the right-click menu still
+            // offers to remove it.
+            let (slot, resp) = ui.allocate_exact_size(cover_size, Sense::click());
             let hover = w::hover_t(ui, &resp, exists);
             let rect = slot.translate(egui::vec2(0.0, -3.0 * hover));
             if ui.is_rect_visible(slot) {
@@ -680,7 +690,11 @@ impl ViewerApp {
                 }
                 painter.rect_filled(rect, 0, p.surface);
                 // Only tiles on screen ask for their cover.
-                match exists.then(|| self.covers.get(ctx, path)).flatten() {
+                let cover = exists.then(|| self.covers.get(ctx, path)).flatten();
+                // Still being drawn in the background (big PDFs take a moment
+                // the first time; after that the cover comes from disk).
+                let loading = exists && cover.is_none();
+                match cover {
                     Some(Cover::Ready(tex)) => {
                         let uv = cover_uv(tex.size(), COVER_ASPECT);
                         painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
@@ -707,11 +721,23 @@ impl ViewerApp {
                         );
                         painter.galley(pos, galley, p.ink);
                     }
+                    _ if loading => {
+                        // A slow, calm pulse while the cover is on its way.
+                        let t = ui.input(|i| i.time) as f32;
+                        let pulse = (t * 2.4).sin() * 0.5 + 0.5;
+                        painter.rect_filled(
+                            rect,
+                            0,
+                            theme::Palette::mix(p.surface, p.hover(), 0.35 + 0.65 * pulse),
+                        );
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(33));
+                    }
                     _ => {
                         painter.text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
-                            if exists { "PDF" } else { "Missing" },
+                            if exists { "PDF" } else { "Unavailable" },
                             egui::FontId::new(11.0, theme::medium()),
                             p.muted,
                         );
@@ -738,7 +764,7 @@ impl ViewerApp {
                         upload = true;
                         ui.close();
                     }
-                    if ui.button("Show in folder").clicked() {
+                    if exists && ui.button("Show in folder").clicked() {
                         open_file_location(path);
                         ui.close();
                     }
