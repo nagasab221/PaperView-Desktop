@@ -3,8 +3,11 @@
 //! instead of cards, and no drop shadows. Colour is kept for things that mean
 //! something — the active tab, a primary action, the current search hit.
 //!
-//! Three skins, each with a light and a dark rendition. The colour values are
-//! the Android app's `Theme.kt`, one for one.
+//! Skins, each with a light and a dark rendition. Paper, Slate and Ink are
+//! the Android app's `Theme.kt`, one for one. The colour skins (one per main
+//! hue) are desktop-only: each is made from a single OKLCH hue at fixed
+//! lightness steps, so they share Paper's quiet, tinted-paper character, and
+//! every text colour clears 4.5:1 contrast against what it sits on.
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Shadow, Stroke,
@@ -16,25 +19,52 @@ pub enum Skin {
     Paper,
     Slate,
     Ink,
+    Cherry,
+    Apricot,
+    Saffron,
+    Forest,
+    Lagoon,
+    Cobalt,
+    Lavender,
+    Blossom,
 }
 
 impl Skin {
-    pub const ALL: [Skin; 3] = [Skin::Paper, Skin::Slate, Skin::Ink];
+    pub const ALL: [Skin; 11] = [
+        Skin::Paper,
+        Skin::Slate,
+        Skin::Ink,
+        Skin::Cherry,
+        Skin::Apricot,
+        Skin::Saffron,
+        Skin::Forest,
+        Skin::Lagoon,
+        Skin::Cobalt,
+        Skin::Lavender,
+        Skin::Blossom,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
             Skin::Paper => "paper",
             Skin::Slate => "slate",
             Skin::Ink => "ink",
+            Skin::Cherry => "cherry",
+            Skin::Apricot => "apricot",
+            Skin::Saffron => "saffron",
+            Skin::Forest => "forest",
+            Skin::Lagoon => "lagoon",
+            Skin::Cobalt => "cobalt",
+            Skin::Lavender => "lavender",
+            Skin::Blossom => "blossom",
         }
     }
 
     pub fn from_key(key: &str) -> Skin {
-        match key {
-            "slate" => Skin::Slate,
-            "ink" => Skin::Ink,
-            _ => Skin::Paper,
-        }
+        Skin::ALL
+            .into_iter()
+            .find(|s| s.key() == key)
+            .unwrap_or(Skin::Paper)
     }
 
     pub fn label(self) -> &'static str {
@@ -42,6 +72,14 @@ impl Skin {
             Skin::Paper => "Paper",
             Skin::Slate => "Slate",
             Skin::Ink => "Ink",
+            Skin::Cherry => "Cherry",
+            Skin::Apricot => "Apricot",
+            Skin::Saffron => "Saffron",
+            Skin::Forest => "Forest",
+            Skin::Lagoon => "Lagoon",
+            Skin::Cobalt => "Cobalt",
+            Skin::Lavender => "Lavender",
+            Skin::Blossom => "Blossom",
         }
     }
 
@@ -50,6 +88,14 @@ impl Skin {
             Skin::Paper => "Warm off-white with a sepia accent",
             Skin::Slate => "Cool grey with a steel-blue accent",
             Skin::Ink => "High contrast, no colour at all",
+            Skin::Cherry => "Rose-tinted paper with a cherry-red accent",
+            Skin::Apricot => "Peach-tinted paper with an orange accent",
+            Skin::Saffron => "Cream paper with a golden-yellow accent",
+            Skin::Forest => "Pale sage with a deep green accent",
+            Skin::Lagoon => "Cool mist with a teal accent",
+            Skin::Cobalt => "Crisp blue-white with a cobalt accent",
+            Skin::Lavender => "Lilac-tinted paper with a purple accent",
+            Skin::Blossom => "Pink-tinted paper with a raspberry accent",
         }
     }
 }
@@ -185,6 +231,182 @@ pub fn palette(skin: Skin, dark: bool) -> Palette {
             on_accent: hex(0x0A0A09),
             viewport: hex(0x000000),
         },
+        (Skin::Cherry, false) => Palette {
+            dark,
+            background: hex(0xFFF7F6),
+            surface: hex(0xFFFDFC),
+            ink: hex(0x1E1312),
+            muted: hex(0x745D5B),
+            hairline: hex(0xEBDBDA),
+            accent: hex(0xAC3031),
+            on_accent: hex(0xFFFDFC),
+            viewport: hex(0xD7C1BF),
+        },
+        (Skin::Cherry, true) => Palette {
+            dark,
+            background: hex(0x130C0C),
+            surface: hex(0x1C1313),
+            ink: hex(0xF1E7E5),
+            muted: hex(0xA99694),
+            hairline: hex(0x2E2422),
+            accent: hex(0xF28881),
+            on_accent: hex(0x170C0B),
+            viewport: hex(0x070404),
+        },
+        (Skin::Apricot, false) => Palette {
+            dark,
+            background: hex(0xFFF7F3),
+            surface: hex(0xFFFDFB),
+            ink: hex(0x1D140F),
+            muted: hex(0x725F54),
+            hairline: hex(0xEADDD5),
+            accent: hex(0xA64B00),
+            on_accent: hex(0xFFFDFB),
+            viewport: hex(0xD6C3B9),
+        },
+        (Skin::Apricot, true) => Palette {
+            dark,
+            background: hex(0x130D0A),
+            surface: hex(0x1C1410),
+            ink: hex(0xF1E7E3),
+            muted: hex(0xA7988F),
+            hairline: hex(0x2D2420),
+            accent: hex(0xF29D6C),
+            on_accent: hex(0x170D08),
+            viewport: hex(0x070403),
+        },
+        (Skin::Saffron, false) => Palette {
+            dark,
+            background: hex(0xFCF9F2),
+            surface: hex(0xFFFEFA),
+            ink: hex(0x19160D),
+            muted: hex(0x6A6350),
+            hairline: hex(0xE5DFD3),
+            accent: hex(0x896600),
+            on_accent: hex(0xFFFEFA),
+            viewport: hex(0xCEC7B5),
+        },
+        (Skin::Saffron, true) => Palette {
+            dark,
+            background: hex(0x100E08),
+            surface: hex(0x19160E),
+            ink: hex(0xEDE9E1),
+            muted: hex(0xA19B8C),
+            hairline: hex(0x2A261E),
+            accent: hex(0xEBC669),
+            on_accent: hex(0x130F06),
+            viewport: hex(0x060503),
+        },
+        (Skin::Forest, false) => Palette {
+            dark,
+            background: hex(0xF5FBF6),
+            surface: hex(0xFBFFFC),
+            ink: hex(0x101812),
+            muted: hex(0x57685A),
+            hairline: hex(0xD8E3D9),
+            accent: hex(0x197037),
+            on_accent: hex(0xFBFFFC),
+            viewport: hex(0xBCCCBF),
+        },
+        (Skin::Forest, true) => Palette {
+            dark,
+            background: hex(0x0B100C),
+            surface: hex(0x111812),
+            ink: hex(0xE4ECE5),
+            muted: hex(0x929F94),
+            hairline: hex(0x212922),
+            accent: hex(0x79CA8B),
+            on_accent: hex(0x09120B),
+            viewport: hex(0x040604),
+        },
+        (Skin::Lagoon, false) => Palette {
+            dark,
+            background: hex(0xF2FBFB),
+            surface: hex(0xFAFFFF),
+            ink: hex(0x0C1919),
+            muted: hex(0x4F6968),
+            hairline: hex(0xD3E4E3),
+            accent: hex(0x007172),
+            on_accent: hex(0xFAFFFF),
+            viewport: hex(0xB6CDCC),
+        },
+        (Skin::Lagoon, true) => Palette {
+            dark,
+            background: hex(0x081010),
+            surface: hex(0x0E1818),
+            ink: hex(0xE1ECEC),
+            muted: hex(0x8CA09F),
+            hairline: hex(0x1D2929),
+            accent: hex(0x5BC8C8),
+            on_accent: hex(0x051212),
+            viewport: hex(0x030606),
+        },
+        (Skin::Cobalt, false) => Palette {
+            dark,
+            background: hex(0xF5F9FF),
+            surface: hex(0xFCFEFF),
+            ink: hex(0x12161E),
+            muted: hex(0x5A6475),
+            hairline: hex(0xD9E0EC),
+            accent: hex(0x1F53B8),
+            on_accent: hex(0xFCFEFF),
+            viewport: hex(0xBFC8D8),
+        },
+        (Skin::Cobalt, true) => Palette {
+            dark,
+            background: hex(0x0B0E14),
+            surface: hex(0x12161D),
+            ink: hex(0xE5EAF2),
+            muted: hex(0x949CA9),
+            hairline: hex(0x22272E),
+            accent: hex(0x84AEFA),
+            on_accent: hex(0x0B0F18),
+            viewport: hex(0x040507),
+        },
+        (Skin::Lavender, false) => Palette {
+            dark,
+            background: hex(0xFAF8FF),
+            surface: hex(0xFEFDFF),
+            ink: hex(0x17141D),
+            muted: hex(0x666072),
+            hairline: hex(0xE1DDEA),
+            accent: hex(0x6C44A4),
+            on_accent: hex(0xFEFDFF),
+            viewport: hex(0xC9C4D6),
+        },
+        (Skin::Lavender, true) => Palette {
+            dark,
+            background: hex(0x0F0D13),
+            surface: hex(0x17151C),
+            ink: hex(0xEAE8F1),
+            muted: hex(0x9D99A7),
+            hairline: hex(0x27252D),
+            accent: hex(0xBD9FF2),
+            on_accent: hex(0x110D17),
+            viewport: hex(0x050507),
+        },
+        (Skin::Blossom, false) => Palette {
+            dark,
+            background: hex(0xFFF6FA),
+            surface: hex(0xFFFCFE),
+            ink: hex(0x1C1317),
+            muted: hex(0x715C66),
+            hairline: hex(0xEADBE1),
+            accent: hex(0xA53C75),
+            on_accent: hex(0xFFFCFE),
+            viewport: hex(0xD5C1C9),
+        },
+        (Skin::Blossom, true) => Palette {
+            dark,
+            background: hex(0x120C0F),
+            surface: hex(0x1B1317),
+            ink: hex(0xF0E6EA),
+            muted: hex(0xA7969D),
+            hairline: hex(0x2D2327),
+            accent: hex(0xF197C2),
+            on_accent: hex(0x160C11),
+            viewport: hex(0x070405),
+        },
     }
 }
 
@@ -229,6 +451,42 @@ impl Palette {
             self.accent,
             if self.dark { 0.22 } else { 0.14 },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let f = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_skin_reads() {
+        for skin in Skin::ALL {
+            assert_eq!(Skin::from_key(skin.key()), skin);
+            for dark in [false, true] {
+                let p = palette(skin, dark);
+                let what = format!("{} {}", skin.label(), if dark { "dark" } else { "light" });
+                assert!(contrast(p.ink, p.background) >= 7.0, "{what}: ink");
+                assert!(contrast(p.muted, p.background) >= 4.5, "{what}: muted");
+                assert!(contrast(p.accent, p.background) >= 4.5, "{what}: accent");
+                assert!(contrast(p.on_accent, p.accent) >= 4.5, "{what}: on accent");
+            }
+        }
     }
 }
 

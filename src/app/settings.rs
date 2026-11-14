@@ -33,15 +33,30 @@ impl ViewerApp {
         ui.add_space(16.0);
         w::field_label(ui, "Style");
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-            let dark = self.theme.is_dark(&ctx);
-            for skin in Skin::ALL {
-                if skin_card(ui, skin, dark, skin == self.skin).clicked() {
-                    self.skin = skin;
+        // Four to a row (two when narrow): the classics on one row, the
+        // eight colours on two.
+        let dark = self.theme.is_dark(&ctx);
+        let gap = 12.0;
+        let cols = if ui.available_width() >= 760.0 {
+            4.0
+        } else {
+            2.0
+        };
+        let card_w = ((ui.available_width().min(1100.0) - gap * (cols - 1.0)) / cols).floor();
+        let (classic, colour) = Skin::ALL.split_at(3);
+        for (title, skins) in [("Classic", classic), ("Colour", colour)] {
+            ui.label(RichText::new(title).small().color(p.muted));
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                for &skin in skins {
+                    if skin_card(ui, skin, dark, skin == self.skin, card_w).clicked() {
+                        self.skin = skin;
+                    }
                 }
-            }
-        });
+            });
+            ui.add_space(10.0);
+        }
         self.density_settings(ui);
 
         // ── Reading ──────────────────────────────────────────────────────────
@@ -377,10 +392,16 @@ impl B2Trimmed {
 }
 
 /// A small preview of a skin: its paper, a rule, a line of ink, its accent.
-fn skin_card(ui: &mut egui::Ui, skin: Skin, dark: bool, selected: bool) -> egui::Response {
+fn skin_card(
+    ui: &mut egui::Ui,
+    skin: Skin,
+    dark: bool,
+    selected: bool,
+    width: f32,
+) -> egui::Response {
     let current = w::pal(ui);
     let sp = theme::palette(skin, dark);
-    let size = egui::vec2(206.0, 92.0);
+    let size = egui::vec2(width, 92.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 6, sp.background);
@@ -408,11 +429,16 @@ fn skin_card(ui: &mut egui::Ui, skin: Skin, dark: bool, selected: bool) -> egui:
         rect.top() + 42.0,
         Stroke::new(1.0, sp.hairline),
     );
-    painter.text(
-        egui::pos2(x, rect.top() + 50.0),
-        egui::Align2::LEFT_TOP,
-        skin.blurb(),
+    // The description wraps inside the card (two lines at most).
+    let blurb = painter.layout(
+        skin.blurb().to_string(),
         egui::FontId::new(10.5, egui::FontFamily::Proportional),
+        sp.muted,
+        rect.width() - 28.0,
+    );
+    painter.with_clip_rect(rect.shrink(1.0)).galley(
+        egui::pos2(x, rect.top() + 50.0),
+        blurb,
         sp.muted,
     );
     painter.circle_filled(

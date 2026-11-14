@@ -1,6 +1,6 @@
 [package]
 name = "paperview"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "PaperView: a lightweight, fast-starting PDF reader for Linux and Windows"
 
