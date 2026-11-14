@@ -454,42 +454,6 @@ impl Palette {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn contrast(a: Color32, b: Color32) -> f32 {
-        let lum = |c: Color32| {
-            let f = |v: u8| {
-                let v = v as f32 / 255.0;
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
-        };
-        let (x, y) = (lum(a), lum(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
-    #[test]
-    fn every_skin_reads() {
-        for skin in Skin::ALL {
-            assert_eq!(Skin::from_key(skin.key()), skin);
-            for dark in [false, true] {
-                let p = palette(skin, dark);
-                let what = format!("{} {}", skin.label(), if dark { "dark" } else { "light" });
-                assert!(contrast(p.ink, p.background) >= 7.0, "{what}: ink");
-                assert!(contrast(p.muted, p.background) >= 4.5, "{what}: muted");
-                assert!(contrast(p.accent, p.background) >= 4.5, "{what}: accent");
-                assert!(contrast(p.on_accent, p.accent) >= 4.5, "{what}: on accent");
-            }
-        }
-    }
-}
-
 // ── Typography ───────────────────────────────────────────────────────────────
 
 /// Serif face for mastheads and titles (Noto Serif — Android's own serif).
@@ -685,4 +649,40 @@ pub fn apply(ctx: &egui::Context, p: &Palette) {
         w.open.fg_stroke = Stroke::new(1.0, p.ink);
         w.open.corner_radius = radius;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let f = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_skin_reads() {
+        for skin in Skin::ALL {
+            assert_eq!(Skin::from_key(skin.key()), skin);
+            for dark in [false, true] {
+                let p = palette(skin, dark);
+                let what = format!("{} {}", skin.label(), if dark { "dark" } else { "light" });
+                assert!(contrast(p.ink, p.background) >= 7.0, "{what}: ink");
+                assert!(contrast(p.muted, p.background) >= 4.5, "{what}: muted");
+                assert!(contrast(p.accent, p.background) >= 4.5, "{what}: accent");
+                assert!(contrast(p.on_accent, p.accent) >= 4.5, "{what}: on accent");
+            }
+        }
+    }
 }
