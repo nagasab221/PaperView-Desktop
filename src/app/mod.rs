@@ -20,6 +20,7 @@ mod books;
 mod chrome;
 mod density;
 mod folders;
+mod handoff;
 mod library;
 mod peek;
 mod reader;
@@ -116,6 +117,36 @@ struct Tab {
     state: Option<Box<DocTab>>,
     /// A book's reader, parked while its tab is inactive.
     book: Option<Box<reader::BookView>>,
+}
+
+/// Where index `a` ends up when the item at `from` moves to `to`.
+fn moved_index(a: usize, from: usize, to: usize) -> usize {
+    if a == from {
+        to
+    } else if from < a && a <= to {
+        a - 1
+    } else if to <= a && a < from {
+        a + 1
+    } else {
+        a
+    }
+}
+
+/// A new PaperView window for `path`, open at `page` (0-based).
+fn spawn_window(path: &Path, page: usize) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--page").arg((page + 1).to_string()).arg(path);
+    // A test run's script is for this window only.
+    cmd.env_remove("PAPERVIEW_AUTOMATE");
+    if let Ok(mut child) = cmd.spawn() {
+        // Reap it when it closes.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// Same file? Windows paths ignore case; everywhere else two paths that
@@ -536,10 +567,22 @@ pub struct ViewerApp {
     shown: bool,
     /// Frame counter used to defer Visible(true) until the second frame.
     frame_nr: u8,
+    /// Talks to the other PaperView windows, to pass tabs between them.
+    handoff: handoff::Handoff,
+    /// Tabs other windows are offering, while we look for the pointer.
+    offers: Vec<handoff::Offer>,
+    /// A tab is being pulled out of the bar right now.
+    tab_loose: bool,
 }
 
 impl ViewerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_file: Option<PathBuf>) -> Self {
+    /// `initial_page` (0-based) goes with `initial_file`: a tab pulled out of
+    /// another window opens where it was.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_file: Option<PathBuf>,
+        initial_page: Option<usize>,
+    ) -> Self {
         // Ctrl+= / Ctrl+- should zoom the *document*, not the whole UI.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
@@ -653,6 +696,9 @@ impl ViewerApp {
             automation: automate::Script::from_env(),
             shown: false,
             frame_nr: 0,
+            handoff: handoff::Handoff::start(&cc.egui_ctx),
+            offers: Vec::new(),
+            tab_loose: false,
         };
 
         // Restore session preferences.
@@ -770,6 +816,9 @@ impl ViewerApp {
             // A directly-launched PDF skips the landing page (and session
             // restore — it gets exactly the file that was asked for).
             app.open_path(&cc.egui_ctx, &path);
+            if let Some(page) = initial_page {
+                app.go_to_page(page as i32);
+            }
         } else {
             // Restore last session's tabs, parked; the landing page shows.
             let restore: Vec<PathBuf> = cc
@@ -1121,6 +1170,91 @@ impl ViewerApp {
             self.tabs.remove(i);
             self.active_tab = fix_active_after_remove(self.active_tab, i);
         }
+    }
+
+    /// Moves tab `from` to position `to`, keeping the active one active.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = self.active_tab.map(|a| moved_index(a, from, to));
+    }
+
+    /// The page tab `i` is on (0-based); books keep their own place.
+    fn tab_page(&self, i: usize) -> usize {
+        let page = if self.active_tab == Some(i) {
+            self.page_index
+        } else {
+            self.tabs[i].state.as_ref().map_or(0, |s| s.page_index)
+        };
+        page.max(0) as usize
+    }
+
+    /// Tab `i` was dropped outside the bar: offer it to the other windows.
+    /// It leaves this one when the answer comes ([`Self::poll_handoff`]).
+    fn tear_off(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        self.save_book_progress();
+        let page = self.tab_page(i);
+        self.handoff.offer(&self.tabs[i].path, page);
+    }
+
+    /// Settles tab hand-offs: answers other windows' offers (we take a tab
+    /// when the pointer is over this window as it's dropped), and acts on the
+    /// answers to ours.
+    fn poll_handoff(&mut self, ctx: &egui::Context) {
+        while let Some(offer) = self.handoff.next_offer() {
+            self.offers.push(offer);
+        }
+        if !self.offers.is_empty() {
+            let over_me = !self.tab_loose && ctx.input(|i| i.pointer.hover_pos().is_some());
+            let mut keep = Vec::new();
+            for offer in std::mem::take(&mut self.offers) {
+                if over_me {
+                    let (path, page) = (offer.path.clone(), offer.page);
+                    offer.answer(true);
+                    self.take_tab(ctx, &path, page);
+                } else if offer.expired() {
+                    offer.answer(false);
+                } else {
+                    keep.push(offer);
+                }
+            }
+            self.offers = keep;
+            if !self.offers.is_empty() {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+        }
+        while let Some(out) = self.handoff.next_outcome() {
+            let Some(i) = self.tabs.iter().position(|t| same_path(&t.path, &out.path)) else {
+                continue;
+            };
+            if out.taken {
+                self.close_tab(ctx, i);
+                // Like a browser: a window whose last tab left closes.
+                if self.tabs.is_empty() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            } else if self.tabs.len() > 1 {
+                // Nobody took it: it gets a window of its own. (A lone tab
+                // already has one.)
+                spawn_window(&out.path, out.page);
+                self.close_tab(ctx, i);
+            }
+        }
+    }
+
+    /// Opens a tab another window handed over, at its page, and comes forward.
+    fn take_tab(&mut self, ctx: &egui::Context, path: &Path, page: usize) {
+        self.try_open(ctx, path, None, false);
+        if self.doc.is_some() && !crate::ebook::is_ebook(path) {
+            self.go_to_page(page as i32);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Shows the landing page; open tabs stay parked in the strip.
@@ -2740,6 +2874,7 @@ impl eframe::App for ViewerApp {
         #[cfg(debug_assertions)]
         let frame_started = Instant::now();
         let ctx = ui.ctx().clone();
+        self.poll_handoff(&ctx);
 
         // The look follows the chosen skin and light/dark (System tracks the OS).
         let palette = theme::palette(self.skin, self.theme.is_dark(&ctx));
@@ -3029,6 +3164,16 @@ impl eframe::App for ViewerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_tab_keeps_the_others_in_order() {
+        // [a b c d]: b (1) to 3 -> [a c d b]
+        let order: Vec<usize> = (0..4).map(|a| moved_index(a, 1, 3)).collect();
+        assert_eq!(order, vec![0, 3, 1, 2]);
+        // d (3) to 0 -> [d a b c]
+        let order: Vec<usize> = (0..4).map(|a| moved_index(a, 3, 0)).collect();
+        assert_eq!(order, vec![1, 2, 3, 0]);
+    }
 
     #[test]
     fn same_path_case() {

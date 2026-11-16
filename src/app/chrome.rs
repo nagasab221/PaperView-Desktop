@@ -13,14 +13,14 @@ use super::{
 use crate::ui::{theme, widgets as w};
 
 const TOAST_FOR: Duration = Duration::from_millis(4500);
-const ACTIONS_W: f32 = 90.0;
-/// Height of a document tab (the tab strip's row).
-const TAB_H: f32 = 44.0;
-/// Height of PaperView's own title bar, and the width of its window buttons.
+/// Empty bar always left between the tabs and the icons, to drag the window by.
+const GRAB_W: f32 = 48.0;
+/// Height of the one top row: menu, tabs, actions and window buttons share
+/// it, the way Firefox puts its tabs in the title bar.
 const TITLE_H: f32 = 34.0;
 const WIN_BTN_W: f32 = 44.0;
 /// Height of the bottom bar's row.
-const BAR_H: f32 = 42.0;
+pub(super) const BAR_H: f32 = 34.0;
 
 impl ViewerApp {
     pub(super) fn toast(&mut self, msg: impl Into<String>) {
@@ -117,10 +117,14 @@ impl ViewerApp {
 
     // ── title bar ────────────────────────────────────────────────────────────
 
-    /// PaperView draws its own title bar, in the app's colours: the open
-    /// document's name in the middle, window buttons on the right. Drag it to
-    /// move the window, double-click to maximise. The window edges resize.
+    /// PaperView draws its own title bar, in the app's colours: the app's name
+    /// in the middle, window buttons on the right. Drag it to move the window,
+    /// double-click to maximise. The window edges resize. Once documents are
+    /// open, [`Self::top_bar`] takes over and carries the tabs in this row.
     pub(super) fn title_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.tabs.is_empty() {
+            return;
+        }
         let ctx = ui.ctx().clone();
         let p = w::pal(ui);
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -143,13 +147,7 @@ impl ViewerApp {
             .show(ui, |ui| {
                 let bar = ui.max_rect();
                 // The whole bar drags the window; buttons drawn on top win.
-                let drag =
-                    ui.interact(bar, egui::Id::new("titlebar-drag"), Sense::click_and_drag());
-                if drag.double_clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                } else if drag.drag_started_by(egui::PointerButton::Primary) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
+                drag_region(ui, bar, maximized);
 
                 // The app menu lives in the left corner, as in Telegram.
                 let corner = egui::Rect::from_min_size(
@@ -200,46 +198,7 @@ impl ViewerApp {
                 let pos = bar.center() - galley.size() * 0.5;
                 ui.painter().galley(pos, galley, p.ink);
 
-                // Window buttons, right to left.
-                let mut x = bar.right();
-                for which in [WinBtn::Close, WinBtn::Maximize, WinBtn::Minimize] {
-                    x -= WIN_BTN_W;
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(x, bar.top()),
-                        egui::vec2(WIN_BTN_W, TITLE_H),
-                    );
-                    let resp =
-                        ui.interact(rect, egui::Id::new(("winbtn", which as u8)), Sense::click());
-                    let t = w::hover_t(ui, &resp, true);
-                    let close = which == WinBtn::Close;
-                    let red = egui::Color32::from_rgb(0xD9, 0x3B, 0x30);
-                    let fill = if close {
-                        red.gamma_multiply(t)
-                    } else {
-                        p.hover().gamma_multiply(t)
-                    };
-                    ui.painter().rect_filled(rect, 0, fill);
-                    let ink = if close {
-                        p.ink.lerp_to_gamma(egui::Color32::WHITE, t)
-                    } else {
-                        p.ink
-                    };
-                    let behind = fill.lerp_to_gamma(p.hover(), t);
-                    paint_win_glyph(ui.painter(), rect.center(), which, maximized, ink, behind);
-                    if resp.clicked() {
-                        ctx.send_viewport_cmd(match which {
-                            WinBtn::Close => egui::ViewportCommand::Close,
-                            WinBtn::Maximize => egui::ViewportCommand::Maximized(!maximized),
-                            WinBtn::Minimize => egui::ViewportCommand::Minimized(true),
-                        });
-                    }
-                    resp.on_hover_text(match which {
-                        WinBtn::Close => "Close",
-                        WinBtn::Maximize if maximized => "Restore",
-                        WinBtn::Maximize => "Maximise",
-                        WinBtn::Minimize => "Minimise",
-                    });
-                }
+                window_buttons(ui, &p, bar, maximized);
             });
     }
 
@@ -316,6 +275,7 @@ impl ViewerApp {
         }
         let ctx = ui.ctx().clone();
         let p = w::pal(ui);
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         self.active_tab_span = None;
         egui::Panel::top("topbar")
             .frame(egui::Frame::NONE.fill(p.tray()))
@@ -324,70 +284,29 @@ impl ViewerApp {
                 // The active tab's underline sits right on the rule below.
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let full = ui.available_width();
+                // One row, as in Firefox: menu, tabs, a free stretch to drag
+                // the window by, the actions, then the window buttons.
+                let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full, TITLE_H));
+                // Registered first, so everything in the row wins over it.
+                drag_region(ui, row, maximized);
+                let buttons_left = window_buttons(ui, &p, row, maximized);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(full, TAB_H),
+                    egui::vec2(buttons_left - row.left(), TITLE_H),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.set_min_height(TAB_H);
+                        ui.set_min_height(TITLE_H);
                         // Tabs fill exactly this band, wherever egui lays them out.
-                        let band = ui.max_rect().y_range();
-                        ui.add_space(4.0);
-                        let tabs_w = (ui.available_width() - ACTIONS_W).max(80.0);
+                        let band = row.y_range();
+                        ui.add_space(6.0);
+                        self.overflow_menu(ui, &ctx);
+                        ui.add_space(2.0);
+                        // Whatever the tabs leave is free bar to drag the window by.
+                        let tabs_w = (ui.available_width() - GRAB_W).max(80.0);
                         ui.allocate_ui_with_layout(
-                            egui::vec2(tabs_w, TAB_H),
+                            egui::vec2(tabs_w, TITLE_H),
                             Layout::left_to_right(Align::Center),
                             |ui| self.tab_strip(ui, &ctx, band),
                         );
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(8.0);
-                            if self.book.is_some() {
-                                let open = self.sidebar != SidebarMode::Hidden;
-                                if w::icon_button(ui, "📖", "Contents", open).clicked() {
-                                    self.sidebar = if open {
-                                        SidebarMode::Hidden
-                                    } else {
-                                        SidebarMode::Toc
-                                    };
-                                }
-                            }
-                            if self.doc.is_some() {
-                                if w::icon_button(
-                                    ui,
-                                    "🔍",
-                                    "Find in document (Ctrl+F)",
-                                    self.search_open,
-                                )
-                                .clicked()
-                                {
-                                    if self.search_open {
-                                        self.close_search();
-                                    } else {
-                                        self.search_open = true;
-                                        self.focus_search = true;
-                                    }
-                                }
-                                let open = self.sidebar != SidebarMode::Hidden;
-                                if w::icon_button(ui, "📖", "Pages and contents", open).clicked()
-                                {
-                                    self.sidebar = if open {
-                                        SidebarMode::Hidden
-                                    } else if self.toc.is_empty() {
-                                        SidebarMode::Thumbs
-                                    } else {
-                                        SidebarMode::Toc
-                                    };
-                                }
-                                // Leftmost of the icons: right-to-left, added last.
-                                let doc_path = self.doc.as_ref().map(|d| d.path.clone());
-                                if let Some(path) = doc_path.filter(|p| self.can_upload(p)) {
-                                    if w::icon_button(ui, "☁", "Save to cloud…", false).clicked()
-                                    {
-                                        self.ask_upload(&ctx, path);
-                                    }
-                                }
-                            }
-                        });
                     },
                 );
                 // The rule under the tabs, broken where the active card joins
@@ -406,13 +325,6 @@ impl ViewerApp {
                         ui.painter().hline(rule.x_range(), rule.center().y, stroke);
                     }
                 }
-                if self.search_open && self.doc.is_some() {
-                    egui::Frame::NONE.fill(p.background).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        self.search_row(ui);
-                    });
-                    w::hairline(ui);
-                }
             });
     }
 
@@ -423,13 +335,17 @@ impl ViewerApp {
         let mut close: Option<usize> = None;
         let mut home = false;
         let mut span: Option<egui::Rect> = None;
+        let mut rects: Vec<egui::Rect> = Vec::with_capacity(self.tabs.len());
+        let mut drag: Option<(usize, DragPhase)> = None;
         let clip = ui.clip_rect();
         egui::ScrollArea::horizontal()
             .id_salt("tab-strip")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            // Wheel only: a drag on the strip's empty end moves the window.
+            .scroll_source(egui::scroll_area::ScrollSource::MOUSE_WHEEL)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.set_height(TAB_H);
+                    ui.set_height(TITLE_H);
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let lib = tab_item(ui, &p, band, "Library", None, self.active_tab.is_none());
                     if lib.0 {
@@ -439,7 +355,7 @@ impl ViewerApp {
                         span = Some(lib.2);
                     }
                     for (i, tab) in self.tabs.iter().enumerate() {
-                        let (clicked, closed, rect) = tab_item(
+                        let (clicked, closed, rect, resp) = tab_item(
                             ui,
                             &p,
                             band,
@@ -455,6 +371,15 @@ impl ViewerApp {
                         }
                         if closed {
                             close = Some(i);
+                        }
+                        rects.push(rect);
+                        if resp.drag_started() {
+                            activate = Some(i);
+                            drag = Some((i, DragPhase::Start));
+                        } else if resp.dragged() {
+                            drag = Some((i, DragPhase::Move));
+                        } else if resp.drag_stopped() {
+                            drag = Some((i, DragPhase::Stop));
                         }
                     }
                 });
@@ -473,12 +398,54 @@ impl ViewerApp {
         }
         if let Some(i) = close {
             self.close_tab(ctx, i);
+        } else if let Some((i, phase)) = drag {
+            self.drag_tab(ctx, &p, band, &rects, i, phase);
+        }
+    }
+
+    /// A tab held and pulled: along the bar it changes places with its
+    /// neighbours; pulled clear of the bar it comes loose, and letting go
+    /// moves it to the PaperView window underneath, or to a new window.
+    fn drag_tab(
+        &mut self,
+        ctx: &egui::Context,
+        p: &theme::Palette,
+        band: egui::Rangef,
+        rects: &[egui::Rect],
+        i: usize,
+        phase: DragPhase,
+    ) {
+        let Some(pos) = ctx.input(|inp| inp.pointer.latest_pos()) else {
+            return;
+        };
+        let screen = ctx.content_rect();
+        // Loose once it's well below the bar, or out of the window.
+        let loose = pos.y > band.max + 28.0 || pos.y < band.min - 6.0 || !screen.contains(pos);
+        match phase {
+            DragPhase::Start | DragPhase::Move => {
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                self.tab_loose = loose;
+                if loose {
+                    let title = truncate_title(&self.tabs[i].title);
+                    paint_loose_tab(ctx, p, pos, &title);
+                } else if i + 1 < rects.len() && pos.x > rects[i + 1].center().x {
+                    self.move_tab(i, i + 1);
+                } else if i > 0 && pos.x < rects[i - 1].center().x {
+                    self.move_tab(i, i - 1);
+                }
+            }
+            DragPhase::Stop => {
+                self.tab_loose = false;
+                if loose {
+                    self.tear_off(i);
+                }
+            }
         }
     }
 
     fn search_row(&mut self, ui: &mut egui::Ui) {
         let p = w::pal(ui);
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             let edit = w::field(ui, &mut self.search.input, "Find in document", false, 260.0);
@@ -499,7 +466,7 @@ impl ViewerApp {
                 w::button(
                     ui,
                     RichText::new(glyph).size(15.0),
-                    w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0),
+                    w::Btn::new(w::Kind::Quiet).enabled(enabled).min(28.0, 28.0),
                 )
             };
             if arrow(ui, "⏶")
@@ -532,7 +499,7 @@ impl ViewerApp {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(4.0);
     }
 
     pub(super) fn close_search(&mut self) {
@@ -714,29 +681,112 @@ impl ViewerApp {
             .show(ui, |ui| {
                 // No gap between the rule and the row, or the row sits low.
                 ui.spacing_mut().item_spacing.y = 0.0;
+                // The find bar opens above the row, as Firefox's does.
+                if self.search_open {
+                    w::hairline(ui);
+                    egui::Frame::NONE.fill(p.background).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.search_row(ui);
+                    });
+                }
                 w::hairline(ui);
                 // Fixed height with every control centred on it: a plain
                 // horizontal row only centres against what came before.
                 let full = ui.available_width();
+                // Narrow windows drop the extras; the ☰ menu still has them.
+                let roomy = full >= 820.0;
                 ui.allocate_ui_with_layout(
                     egui::vec2(full, BAR_H),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.set_min_height(BAR_H);
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.add_space(10.0);
+                        ui.add_space(6.0);
+                        // Left: the panels, then where you are.
+                        let open = self.sidebar != SidebarMode::Hidden;
+                        if bar_icon(ui, "📖", "Pages and contents", open).clicked() {
+                            self.sidebar = if open {
+                                SidebarMode::Hidden
+                            } else if self.toc.is_empty() {
+                                SidebarMode::Thumbs
+                            } else {
+                                SidebarMode::Toc
+                            };
+                        }
+                        if bar_icon(ui, "🔍", "Find in document (Ctrl+F)", self.search_open)
+                            .clicked()
+                        {
+                            self.toggle_search();
+                        }
+                        bar_divider(ui);
                         self.page_controls(ui);
                         if self.peek_spot().is_some() {
-                            ui.add_space(6.0);
+                            ui.add_space(2.0);
                             self.peek_eye(ui, &ctx);
                         }
+                        // Right, right to left: full screen, zoom, fit,
+                        // turning and layout, then the file's actions.
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(10.0);
+                            ui.add_space(6.0);
+                            if bar_icon(ui, "⛶", "Full screen (F11)", false).clicked() {
+                                self.set_immersive(&ctx, true);
+                            }
+                            bar_divider(ui);
                             self.zoom_controls(ui);
+                            bar_divider(ui);
+                            if bar_icon(ui, "⟳", "Rotate right", false).clicked() {
+                                self.rotate_by(1);
+                            }
+                            if bar_icon(ui, "⟲", "Rotate left", false).clicked() {
+                                self.rotate_by(-1);
+                            }
+                            let single = self.mode == ViewMode::Single;
+                            if bar_icon(
+                                ui,
+                                "🗐",
+                                if single {
+                                    "One page at a time — click for continuous scroll"
+                                } else {
+                                    "Continuous scroll — click for one page at a time"
+                                },
+                                single,
+                            )
+                            .clicked()
+                            {
+                                self.mode = if single {
+                                    ViewMode::Continuous
+                                } else {
+                                    ViewMode::Single
+                                };
+                                self.scroll_to = Some(ScrollTarget::PageTop(self.page_index));
+                            }
+                            if roomy {
+                                bar_divider(ui);
+                                if bar_icon(ui, "🖶", "Print (Ctrl+P)", false).clicked()
+                                    && !self.printing
+                                {
+                                    self.start_print(&ctx);
+                                }
+                                let doc_path = self.doc.as_ref().map(|d| d.path.clone());
+                                if let Some(path) = doc_path.filter(|p| self.can_upload(p)) {
+                                    if bar_icon(ui, "☁", "Save to cloud…", false).clicked() {
+                                        self.ask_upload(&ctx, path);
+                                    }
+                                }
+                            }
                         });
                     },
                 );
             });
+    }
+
+    fn toggle_search(&mut self) {
+        if self.search_open {
+            self.close_search();
+        } else {
+            self.search_open = true;
+            self.focus_search = true;
+        }
     }
 
     pub(super) fn page_controls(&mut self, ui: &mut egui::Ui) {
@@ -791,10 +841,10 @@ impl ViewerApp {
         let resp = w::button(
             ui,
             RichText::new(if away { "↩" } else { "👁" })
-                .size(16.0)
+                .size(15.0)
                 .color(tint),
             w::Btn::new(kind)
-                .min(32.0, 32.0)
+                .min(30.0, 28.0)
                 .sense(Sense::click_and_drag()),
         )
         .on_hover_text(if away {
@@ -817,7 +867,7 @@ impl ViewerApp {
             self.change_zoom(Zoom::Custom(self.effective_zoom * 1.25), None);
         }
         let pct = RichText::new(format!("{:.0}%", self.effective_zoom * 100.0)).color(p.muted);
-        if w::button(ui, pct, w::Btn::new(w::Kind::Quiet).min(56.0, 32.0))
+        if w::button(ui, pct, w::Btn::new(w::Kind::Quiet).min(48.0, 28.0))
             .on_hover_text("Actual size (Ctrl+0)")
             .clicked()
         {
@@ -829,7 +879,7 @@ impl ViewerApp {
         {
             self.change_zoom(Zoom::Custom(self.effective_zoom / 1.25), None);
         }
-        ui.add_space(14.0);
+        bar_divider(ui);
         let fit = |ui: &mut egui::Ui, label: &str, on: bool| {
             let kind = if on {
                 w::Kind::Selected
@@ -838,7 +888,7 @@ impl ViewerApp {
             };
             let rt = RichText::new(label);
             let rt = if on { rt.family(theme::medium()) } else { rt };
-            w::button(ui, rt, w::Btn::new(kind).min(60.0, 32.0))
+            w::button(ui, rt, w::Btn::new(kind).min(50.0, 28.0))
         };
         if fit(ui, "Width", self.zoom == Zoom::FitWidth)
             .on_hover_text("Fit the page width")
@@ -994,10 +1044,10 @@ fn tab_item(
     title: &str,
     path: Option<&str>,
     active: bool,
-) -> (bool, bool, egui::Rect) {
-    const PAD: f32 = 14.0;
+) -> (bool, bool, egui::Rect, egui::Response) {
+    const PAD: f32 = 12.0;
     const CLOSE: f32 = 20.0;
-    const LIFT: f32 = 7.0;
+    const LIFT: f32 = 5.0;
     let rt = RichText::new(title);
     let rt = if active {
         rt.family(theme::medium())
@@ -1015,7 +1065,13 @@ fn tab_item(
     // Take the width in the layout, but draw and click across the bar's band.
     let (slot, _) = ui.allocate_exact_size(egui::vec2(width, 20.0), Sense::hover());
     let rect = egui::Rect::from_x_y_ranges(slot.x_range(), band);
-    let resp = ui.interact(rect, ui.id().with(("tab", title, path)), Sense::click());
+    // Document tabs can be dragged: along the bar to reorder, out to move.
+    let sense = if path.is_some() {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let resp = ui.interact(rect, ui.id().with(("tab", title, path)), sense);
 
     let hover = w::hover_t(ui, &resp, !active);
     let on = ui
@@ -1106,7 +1162,139 @@ fn tab_item(
             closed = true;
         }
     }
-    (resp.clicked() && !closed, closed, card)
+    let clicked = resp.clicked() && !closed;
+    (clicked, closed, card, resp)
+}
+
+/// Makes `rect` move the window when dragged and maximise it on a
+/// double-click. Register it before the widgets on top of it, so they win.
+fn drag_region(ui: &mut egui::Ui, rect: egui::Rect, maximized: bool) {
+    let drag = ui.interact(
+        rect,
+        egui::Id::new("titlebar-drag"),
+        Sense::click_and_drag(),
+    );
+    if drag.double_clicked() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if drag.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+/// Minimise, maximise and close at the right end of `bar`, full bar height.
+/// Returns the left edge of the group.
+fn window_buttons(ui: &mut egui::Ui, p: &theme::Palette, bar: egui::Rect, maximized: bool) -> f32 {
+    let mut x = bar.right();
+    for which in [WinBtn::Close, WinBtn::Maximize, WinBtn::Minimize] {
+        x -= WIN_BTN_W;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(x, bar.top()),
+            egui::vec2(WIN_BTN_W, bar.height()),
+        );
+        let resp = ui.interact(rect, egui::Id::new(("winbtn", which as u8)), Sense::click());
+        let t = w::hover_t(ui, &resp, true);
+        let close = which == WinBtn::Close;
+        let red = egui::Color32::from_rgb(0xD9, 0x3B, 0x30);
+        let fill = if close {
+            red.gamma_multiply(t)
+        } else {
+            p.hover().gamma_multiply(t)
+        };
+        ui.painter().rect_filled(rect, 0, fill);
+        let ink = if close {
+            p.ink.lerp_to_gamma(egui::Color32::WHITE, t)
+        } else {
+            p.ink
+        };
+        let behind = fill.lerp_to_gamma(p.hover(), t);
+        paint_win_glyph(ui.painter(), rect.center(), which, maximized, ink, behind);
+        if resp.clicked() {
+            ui.ctx().send_viewport_cmd(match which {
+                WinBtn::Close => egui::ViewportCommand::Close,
+                WinBtn::Maximize => egui::ViewportCommand::Maximized(!maximized),
+                WinBtn::Minimize => egui::ViewportCommand::Minimized(true),
+            });
+        }
+        resp.on_hover_text(match which {
+            WinBtn::Close => "Close",
+            WinBtn::Maximize if maximized => "Restore",
+            WinBtn::Maximize => "Maximise",
+            WinBtn::Minimize => "Minimise",
+        });
+    }
+    x
+}
+
+/// A top-bar action: a little smaller than [`w::icon_button`], to fit the
+/// single compact row.
+pub(super) fn bar_icon(ui: &mut egui::Ui, glyph: &str, tip: &str, on: bool) -> egui::Response {
+    w::button(
+        ui,
+        RichText::new(glyph).size(15.0),
+        w::Btn::new(if on {
+            w::Kind::Selected
+        } else {
+            w::Kind::Quiet
+        })
+        .min(30.0, 28.0),
+    )
+    .on_hover_text(tip)
+}
+
+/// A short upright rule between groups of bar controls.
+pub(super) fn bar_divider(ui: &mut egui::Ui) {
+    let p = w::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(11.0, 16.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0, p.hairline),
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragPhase {
+    Start,
+    Move,
+    Stop,
+}
+
+/// The loose tab under the pointer while it's pulled out of the bar.
+fn paint_loose_tab(ctx: &egui::Context, p: &theme::Palette, at: egui::Pos2, title: &str) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("loose-tab"),
+    ));
+    let galley = painter.layout_no_wrap(
+        title.to_string(),
+        egui::FontId::new(13.5, theme::medium()),
+        p.ink,
+    );
+    let size = galley.size() + egui::vec2(28.0, 14.0);
+    let card = egui::Rect::from_min_size(at + egui::vec2(-size.x * 0.5, 8.0), size);
+    painter.add(
+        egui::epaint::Shadow {
+            offset: [0, 3],
+            blur: 12,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(60),
+        }
+        .as_shape(card, 6),
+    );
+    painter.rect(
+        card,
+        6,
+        p.background,
+        Stroke::new(1.0, p.hairline),
+        egui::StrokeKind::Inside,
+    );
+    painter.hline(
+        card.left() + 5.0..=card.right() - 5.0,
+        card.top() + 1.0,
+        Stroke::new(2.0, p.accent),
+    );
+    painter.galley(card.center() - galley.size() * 0.5, galley, p.ink);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1160,7 +1348,7 @@ fn paint_win_glyph(
 pub(super) fn step_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
     w::button(
         ui,
-        RichText::new(glyph).size(17.0),
-        w::Btn::new(w::Kind::Quiet).enabled(enabled).min(32.0, 32.0),
+        RichText::new(glyph).size(16.0),
+        w::Btn::new(w::Kind::Quiet).enabled(enabled).min(28.0, 28.0),
     )
 }

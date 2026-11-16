@@ -211,25 +211,35 @@ impl ViewerApp {
                 self.progress_rail(ui);
                 let full = ui.available_width();
                 ui.allocate_ui_with_layout(
-                    egui::vec2(full, 42.0),
+                    egui::vec2(full, super::chrome::BAR_H),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.set_min_height(42.0);
+                        ui.set_min_height(super::chrome::BAR_H);
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.add_space(10.0);
+                        ui.add_space(6.0);
+                        let open = self.sidebar != SidebarMode::Hidden;
+                        if super::chrome::bar_icon(ui, "📖", "Contents", open).clicked() {
+                            self.sidebar = if open {
+                                SidebarMode::Hidden
+                            } else {
+                                SidebarMode::Toc
+                            };
+                        }
+                        super::chrome::bar_divider(ui);
                         self.book_page_controls(ui);
                         ui.add_space(14.0);
                         // Right side first, so the chapter gets what's left.
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(10.0);
-                            if w::icon_button(ui, "⛶", "Full screen (F11)", self.immersive)
+                            ui.add_space(6.0);
+                            if super::chrome::bar_icon(ui, "⛶", "Full screen (F11)", self.immersive)
                                 .clicked()
                             {
                                 let on = !self.immersive;
                                 self.set_immersive(ui.ctx(), on);
                             }
+                            super::chrome::bar_divider(ui);
                             self.reading_button(ui);
-                            ui.add_space(12.0);
+                            super::chrome::bar_divider(ui);
                             let one = w::tool_button(ui, "One page", !self.book_spread);
                             let two = w::tool_button(ui, "Two pages", self.book_spread);
                             if one.clicked() {
@@ -412,7 +422,7 @@ impl ViewerApp {
             } else {
                 w::Kind::Quiet
             })
-            .min(36.0, 32.0),
+            .min(34.0, 28.0),
         )
         .on_hover_text("Typeface, size and spacing");
         egui::Popup::from_toggle_button_response(&resp)

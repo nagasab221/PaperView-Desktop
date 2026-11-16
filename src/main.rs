@@ -19,7 +19,17 @@ fn main() -> eframe::Result<()> {
     // `paperview.exe some.pdf` opens the file straight away (the hook the
     // "Open with" association uses). --register / --unregister manage the
     // per-user .pdf association headlessly (for scripts and installers).
-    let first_arg = std::env::args_os().nth(1);
+    // `--page N file` opens at page N (a tab pulled out into its own window).
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut initial_page = None;
+    if args.len() >= 3 && args[0] == "--page" {
+        initial_page = args[1]
+            .to_str()
+            .and_then(|n| n.parse::<usize>().ok())
+            .map(|n| n.saturating_sub(1));
+        args.drain(..2);
+    }
+    let first_arg = args.into_iter().next();
     match first_arg.as_deref().and_then(|s| s.to_str()) {
         Some("--register") => {
             if let Err(e) = paperview::assoc::register() {
@@ -83,6 +93,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PaperView",
         options,
-        Box::new(move |cc| Ok(Box::new(ViewerApp::new(cc, initial_file)))),
+        Box::new(move |cc| Ok(Box::new(ViewerApp::new(cc, initial_file, initial_page)))),
     )
 }
