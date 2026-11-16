@@ -17,7 +17,7 @@ const TOAST_FOR: Duration = Duration::from_millis(4500);
 const GRAB_W: f32 = 48.0;
 /// Height of the one top row: menu, tabs, actions and window buttons share
 /// it, the way Firefox puts its tabs in the title bar.
-const TITLE_H: f32 = 34.0;
+pub(super) const TITLE_H: f32 = 34.0;
 const WIN_BTN_W: f32 = 44.0;
 /// Height of the bottom bar's row.
 pub(super) const BAR_H: f32 = 34.0;
@@ -421,11 +421,25 @@ impl ViewerApp {
         let screen = ctx.content_rect();
         // Loose once it's well below the bar, or out of the window.
         let loose = pos.y > band.max + 28.0 || pos.y < band.min - 6.0 || !screen.contains(pos);
+        // A Wayland drag just ended; egui catches up next frame.
+        if self.drag_settled {
+            if phase == DragPhase::Stop {
+                self.drag_settled = false;
+            }
+            return;
+        }
         match phase {
             DragPhase::Start | DragPhase::Move => {
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                if self.dnd_tab.is_some() {
+                    return; // the compositor has it now
+                }
                 self.tab_loose = loose;
                 if loose {
+                    // Wayland: a real drag the compositor carries anywhere.
+                    if self.has_dnd() && self.start_tab_dnd(i) {
+                        return;
+                    }
                     let title = truncate_title(&self.tabs[i].title);
                     paint_loose_tab(ctx, p, pos, &title);
                 } else if i + 1 < rects.len() && pos.x > rects[i + 1].center().x {
@@ -436,6 +450,10 @@ impl ViewerApp {
             }
             DragPhase::Stop => {
                 self.tab_loose = false;
+                // The compositor never took the drag up: carry on without it.
+                if self.dnd_tab.take().is_some() {
+                    self.abandon_tab_dnd();
+                }
                 if loose {
                     self.tear_off(i);
                 }

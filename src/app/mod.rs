@@ -26,6 +26,8 @@ mod peek;
 mod reader;
 mod settings;
 mod typography;
+#[cfg(target_os = "linux")]
+mod wl_dnd;
 use crate::pdf::{Document, LinkTarget, OpenError, PdfEngine, TocEntry};
 use crate::print::{self, PrintEvent};
 use crate::search::SearchState;
@@ -573,6 +575,21 @@ pub struct ViewerApp {
     offers: Vec<handoff::Offer>,
     /// A tab is being pulled out of the bar right now.
     tab_loose: bool,
+    /// Wayland drag and drop, once joined (first frame).
+    #[cfg(target_os = "linux")]
+    dnd: Option<wl_dnd::Dnd>,
+    dnd_tried: bool,
+    /// The tab out on a Wayland drag right now: (path, page).
+    dnd_tab: Option<(PathBuf, usize)>,
+    /// The Wayland drag is over but egui, which never saw the button come
+    /// up, still thinks the tab is held.
+    drag_settled: bool,
+    /// Next frame: tell egui the button came up (see `drag_settled`).
+    release_pointer: bool,
+    /// Our tab came back down on our own window, at this height.
+    own_drop: Option<f32>,
+    /// Files dropped through Wayland drag and drop, for egui's next frame.
+    pending_files: Vec<PathBuf>,
 }
 
 impl ViewerApp {
@@ -699,6 +716,14 @@ impl ViewerApp {
             handoff: handoff::Handoff::start(&cc.egui_ctx),
             offers: Vec::new(),
             tab_loose: false,
+            #[cfg(target_os = "linux")]
+            dnd: None,
+            dnd_tried: false,
+            dnd_tab: None,
+            drag_settled: false,
+            release_pointer: false,
+            own_drop: None,
+            pending_files: Vec::new(),
         };
 
         // Restore session preferences.
@@ -1246,6 +1271,112 @@ impl ViewerApp {
                 self.close_tab(ctx, i);
             }
         }
+    }
+
+    /// Whether tab drags go through Wayland drag and drop.
+    fn has_dnd(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.dnd.is_some();
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
+    /// Tab `i` has left the bar: hand it to the compositor as a real drag,
+    /// with a picture of its page under the pointer.
+    #[cfg(target_os = "linux")]
+    fn start_tab_dnd(&mut self, i: usize) -> bool {
+        if i >= self.tabs.len() || self.dnd.as_ref().is_none_or(|d| d.dragging()) {
+            return false;
+        }
+        self.save_book_progress();
+        let page = self.tab_page(i);
+        let path = self.tabs[i].path.clone();
+        let p = self
+            .applied
+            .unwrap_or_else(|| theme::palette(self.skin, false));
+        let edge = p.hairline.lerp_to_gamma(p.muted, 0.5);
+        let picture = (self.active_tab == Some(i))
+            .then_some(self.doc.as_ref())
+            .flatten()
+            .and_then(|d| d.render_page(page as i32, 150, self.rotation).ok());
+        let icon = match picture {
+            Some(r) => {
+                wl_dnd::DragIcon::framed(&r.rgba, r.width as u32, r.height as u32, edge, p.accent)
+            }
+            None => wl_dnd::DragIcon::card(p.background, edge, p.accent),
+        };
+        let started = self
+            .dnd
+            .as_mut()
+            .is_some_and(|d| d.start_tab_drag(&path, page, &icon));
+        if started {
+            self.dnd_tab = Some((path, page));
+        }
+        started
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn start_tab_dnd(&mut self, _i: usize) -> bool {
+        false
+    }
+
+    fn abandon_tab_dnd(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(d) = &mut self.dnd {
+            d.abandon();
+        }
+    }
+
+    /// Drops onto this window, and the end of our own tab drags.
+    fn poll_dnd(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        while let Some(ev) = self.dnd.as_mut().and_then(|d| d.next_event()) {
+            use wl_dnd::DndEvent;
+            match ev {
+                DndEvent::TabDropped { path, page } => self.take_tab(ctx, &path, page),
+                DndEvent::Files(files) => {
+                    self.pending_files.extend(files);
+                    ctx.request_repaint();
+                }
+                DndEvent::OwnDrop { y } => self.own_drop = Some(y / ctx.zoom_factor()),
+                DndEvent::DragEnded { taken } => {
+                    // egui never saw the button come up: tell it, and ignore
+                    // the held tab until it has.
+                    self.release_pointer = true;
+                    self.drag_settled = true;
+                    self.tab_loose = false;
+                    ctx.request_repaint();
+                    let Some((path, page)) = self.dnd_tab.take() else {
+                        continue;
+                    };
+                    let Some(i) = self.tabs.iter().position(|t| same_path(&t.path, &path)) else {
+                        continue;
+                    };
+                    match self.own_drop.take() {
+                        // Back on its own bar: nothing changes.
+                        Some(y) if y <= chrome::TITLE_H + 8.0 => {}
+                        // Taken by another window: it leaves this one, and
+                        // a window whose last tab left closes.
+                        None if taken => {
+                            self.close_tab(ctx, i);
+                            if self.tabs.is_empty() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        }
+                        // Dropped on its own page, or anywhere that isn't a
+                        // PaperView window: a window of its own.
+                        _ => {
+                            if self.tabs.len() > 1 {
+                                spawn_window(&path, page);
+                                self.close_tab(ctx, i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = ctx;
     }
 
     /// Opens a tab another window handed over, at its page, and comes forward.
@@ -2865,8 +2996,26 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
-    #[cfg(debug_assertions)]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx
+                .input(|i| i.pointer.latest_pos())
+                .unwrap_or(egui::Pos2::ZERO);
+            raw_input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: raw_input.modifiers,
+            });
+            raw_input.events.push(egui::Event::PointerGone);
+        }
+        for path in self.pending_files.drain(..) {
+            raw_input.dropped_files.push(egui::DroppedFile {
+                path: Some(path),
+                ..Default::default()
+            });
+        }
+        #[cfg(debug_assertions)]
         self.automate(ctx, raw_input);
     }
 
@@ -2874,7 +3023,14 @@ impl eframe::App for ViewerApp {
         #[cfg(debug_assertions)]
         let frame_started = Instant::now();
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "linux")]
+        if !std::mem::replace(&mut self.dnd_tried, true) {
+            self.dnd = wl_dnd::Dnd::connect(frame, &ctx);
+            #[cfg(debug_assertions)]
+            eprintln!("paperview: wayland drag and drop: {}", self.dnd.is_some());
+        }
         self.poll_handoff(&ctx);
+        self.poll_dnd(&ctx);
 
         // The look follows the chosen skin and light/dark (System tracks the OS).
         let palette = theme::palette(self.skin, self.theme.is_dark(&ctx));

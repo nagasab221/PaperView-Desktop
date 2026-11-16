@@ -49,6 +49,12 @@ ureq = { version = "3", default-features = false, features = ["native-tls", "gzi
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 
+# Wayland drag and drop (tabs between windows, files from file managers):
+# winit has none, so PaperView speaks it on winit's own connection. Same
+# versions winit already pulls in.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31", features = ["system"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

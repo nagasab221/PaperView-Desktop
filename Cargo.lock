@@ -2473,6 +2473,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "ureq",
+ "wayland-client",
  "zip",
 ]
 
