@@ -150,7 +150,45 @@ self-signed certificate".
 - Then the existing Cloud tab switch, *Auto-save opened documents* ("…to <account>"), and
   a note on where secrets are kept.
 
-## 7. Testing what you port
+## 7. Connection checks (before an account is saved)
+
+The desktop never saves an account it hasn't heard from, unless the reader insists:
+
+- The form's main button is **Connect and save**. It lists the top folder in the
+  background, with the typed secret kept in memory only. While that runs, the fields are
+  disabled and the form shows a spinner, the worker's current step ("Connecting to nagasab
+  over SSH…", "Contacting nas.local…", "Signing in to Backblaze…", "Signed in — reading the
+  folder…") and the seconds elapsed, plus a **Stop** button.
+- **Success:** save the account (and the secret), close the form, make the account current,
+  fill the Cloud tab from that same listing, and show "Connected to <name> — 3 documents and
+  2 folders".
+- **Failure:** save nothing. Show "Couldn't connect — nothing was saved", the reason, and the
+  buttons **Try again**, **Save anyway** (for a NAS that's off right now) and **Cancel**.
+- Reasons are made plain. DNS failure → "The address couldn't be found — check the host
+  name." Refused → "Nothing answered at that address and port…". Timeout → "No answer in
+  time…". 401/403 → the server's message or "check the user name / key and password".
+  SSH key refused → explain key login (on Android: show the app's public key).
+- Timeouts so a dead server fails fast: resolve 10 s, connect 15 s, first response 30 s.
+- Each account row in Settings gets a **Test** button and a status line ("✔ Connected · 19
+  documents and 2 folders · checked 21:41", or "Couldn't connect: …"), kept for the session.
+- The Cloud tab shows "✔ Connected" or "Not connected" beside the breadcrumb, and the busy
+  line counts seconds ("Connecting to nagasab over SSH…  6 s").
+
+## 8. Uploading whole folders
+
+- The Cloud tab header has **Upload files…** and **Upload folder…**. On Android, pick the
+  folder with `ACTION_OPEN_DOCUMENT_TREE` and walk it with `DocumentFile`.
+- The folder is recreated under the folder being shown: `<current>/<folder name>/…`, keeping
+  its subfolders. Only documents go up (PDF + ebook extensions). Hidden files and folders are
+  skipped, and folders with no documents are not created.
+- On WebDAV, SFTP and Folder accounts, make the folders (parents first) before uploading,
+  ignoring "already exists". S3 and B2 need no folder objects for this.
+- Upload one file at a time with one overall progress bar and "Uploading 3 of 23:
+  Math/Algebra.pdf". If a file fails, keep going and report the failures at the end
+  ("Uploaded 21 documents from Study; 2 didn't go up: …").
+- Refuse a folder that is (or contains) a Folder account's own folder, or the download cache.
+
+## 9. Testing what you port
 
 - The desktop's `examples/cloud_probe.rs` runs mkdir → upload → list → download
   (byte-compared) → rename → delete against any account. Write the same as an instrumented

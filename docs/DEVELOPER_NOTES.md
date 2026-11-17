@@ -362,5 +362,21 @@ downloads and files already inside a Folder account.
 the keyring look absent. The UI's Cloud tab can be seeded through a scratch
 `$XDG_DATA_HOME/paperview/app.ron` with a `cloud_accounts` entry.
 
+**Connection checks.** "Connect and save" in the account form runs a `List("")` on its own
+channel (`settings::CloudTest`, separate from the op queue) with the typed secret passed as
+`plain_secret` on a throwaway copy. The account is committed only when that listing arrives,
+and the listing then seeds the Cloud tab. On failure the form keeps the error, offers *Save
+anyway*, and saves nothing. Workers report stages ("Connecting to nagasab over SSH…",
+"Signed in — reading the folder…") and the UI adds the seconds. `cloud_health` keeps each
+account's last result for Settings (Test button per row). HTTP has resolve/connect/response
+timeouts (10/15/30 s) and SSH a 15 s `ConnectTimeout`; `cloud::network_hint` turns DNS,
+refused and timeout errors into a sentence.
+
+**Folder uploads.** `CloudOp::UploadFolder(dir, target)`: the worker walks the folder
+(`cloud::documents_in`: documents only, hidden entries skipped, folder links not followed),
+makes the subfolders on backends that need them (not S3/B2), uploads one by one with overall
+progress, keeps going past failures and reports them in `FolderUploaded`. A dropped folder
+on the Cloud tab uploads instead of joining the Library.
+
 **Android:** `docs/ANDROID_CLOUD_PORT.md` lists what the phone app needs to match.
 

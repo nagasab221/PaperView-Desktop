@@ -38,7 +38,8 @@ fn io(what: &str, e: std::io::Error) -> String {
 
 impl Backend for Folder {
     fn list(&mut self, dir: &str) -> Result<Vec<CloudFile>, String> {
-        let rd = std::fs::read_dir(self.path(dir)).map_err(|e| io("Could not read the folder", e))?;
+        let rd =
+            std::fs::read_dir(self.path(dir)).map_err(|e| io("Could not read the folder", e))?;
         let mut out = Vec::new();
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -102,7 +103,8 @@ impl Backend for Folder {
     }
 
     fn delete(&mut self, path: &str, _id: &str) -> Result<(), String> {
-        std::fs::remove_file(self.path(path)).map_err(|e| io(&format!("Could not delete {path}"), e))
+        std::fs::remove_file(self.path(path))
+            .map_err(|e| io(&format!("Could not delete {path}"), e))
     }
 
     fn rename(&mut self, from: &str, _id: &str, to: &str) -> Result<(), String> {

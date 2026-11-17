@@ -287,6 +287,7 @@ impl Sftp {
             .map(str::trim)
             .rfind(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
             .unwrap_or("")
+            .trim_start_matches("ssh: ")
             .to_string();
         if last.contains("Permission denied") {
             format!(
@@ -301,13 +302,20 @@ impl Sftp {
                 .to_string()
         } else if last.is_empty() {
             "The SSH connection closed".to_string()
+        } else if let Some(hint) = super::network_hint(&last) {
+            format!("SSH: {last}. {hint}")
         } else {
             format!("SSH: {last}")
         }
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        if self.stdin.write_all(bytes).and_then(|()| self.stdin.flush()).is_err() {
+        if self
+            .stdin
+            .write_all(bytes)
+            .and_then(|()| self.stdin.flush())
+            .is_err()
+        {
             return Err(self.ssh_error());
         }
         Ok(())
@@ -418,14 +426,23 @@ impl Sftp {
     fn ensure_base(&mut self) -> Result<(), String> {
         match self.stat(&self.base.clone())? {
             Some(a) if a.is_dir() || a.is_link() => return Ok(()),
-            Some(_) => return Err(format!("{} on the server is a file, not a folder", self.base)),
+            Some(_) => {
+                return Err(format!(
+                    "{} on the server is a file, not a folder",
+                    self.base
+                ))
+            }
             None => {}
         }
         let absolute = self.base.starts_with('/');
         let mut so_far = String::new();
         for part in self.base.clone().split('/').filter(|p| !p.is_empty()) {
             if so_far.is_empty() {
-                so_far = if absolute { format!("/{part}") } else { part.to_string() };
+                so_far = if absolute {
+                    format!("/{part}")
+                } else {
+                    part.to_string()
+                };
             } else {
                 so_far = format!("{so_far}/{part}");
             }
@@ -503,7 +520,12 @@ impl Backend for Sftp {
             if attrs.is_dir() {
                 out.push(CloudFile::dir(path));
             } else if attrs.is_file() {
-                out.push(CloudFile::file(path, attrs.size, attrs.mtime * 1000, String::new()));
+                out.push(CloudFile::file(
+                    path,
+                    attrs.size,
+                    attrs.mtime * 1000,
+                    String::new(),
+                ));
             }
         }
         Ok(out)
@@ -554,7 +576,8 @@ impl Backend for Sftp {
                             chunks.insert(off, data);
                             if n < len {
                                 // A short read: ask for the rest of that span.
-                                let id = self.send(READ, &read_req(&handle, off + n as u64, len - n))?;
+                                let id =
+                                    self.send(READ, &read_req(&handle, off + n as u64, len - n))?;
                                 pending.insert(id, (off + n as u64, len - n));
                             }
                         }
@@ -594,14 +617,20 @@ impl Backend for Sftp {
         progress: &mut dyn FnMut(u64),
     ) -> Result<(), String> {
         let full = self.full(path);
-        let handle = self.open(&full, WRITE_FLAG | CREAT | TRUNC, "Could not create the file")?;
+        let handle = self.open(
+            &full,
+            WRITE_FLAG | CREAT | TRUNC,
+            "Could not create the file",
+        )?;
         let mut pending: HashMap<u32, usize> = HashMap::new();
         let mut chunks = data.chunks(CHUNK as usize).enumerate();
         let mut acked = 0u64;
         let result = (|| -> Result<(), String> {
             loop {
                 while pending.len() < WINDOW {
-                    let Some((i, chunk)) = chunks.next() else { break };
+                    let Some((i, chunk)) = chunks.next() else {
+                        break;
+                    };
                     let mut p = Vec::with_capacity(handle.len() + chunk.len() + 16);
                     put_str(&mut p, &handle);
                     put_u64(&mut p, (i * CHUNK as usize) as u64);

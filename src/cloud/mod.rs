@@ -218,7 +218,11 @@ pub fn new_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:x}{:x}", t & 0xffff_ffff_ffff, N.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{:x}{:x}",
+        t & 0xffff_ffff_ffff,
+        N.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +286,15 @@ pub enum CloudEvent {
     },
     /// Terminal: upload finished.
     UploadDone { name: String, bytes: u64, secs: f64 },
+    /// Terminal: a folder's documents were uploaded; `failed` holds
+    /// (path, why) for any that weren't.
+    FolderUploaded {
+        name: String,
+        files: usize,
+        bytes: u64,
+        secs: f64,
+        failed: Vec<(String, String)>,
+    },
     /// Terminal: files deleted.
     Deleted(usize),
     /// Terminal: a file now goes by a new name; its downloaded copy (if any)
@@ -307,7 +320,9 @@ impl CloudEvent {
     pub fn is_terminal(&self) -> bool {
         !matches!(
             self,
-            CloudEvent::Status(_) | CloudEvent::Progress { .. } | CloudEvent::SecretNotStored { .. }
+            CloudEvent::Status(_)
+                | CloudEvent::Progress { .. }
+                | CloudEvent::SecretNotStored { .. }
         )
     }
 }
@@ -331,6 +346,9 @@ pub enum CloudOp {
         to: String,
     },
     MakeFolder(String),
+    /// A local folder, and the path to recreate it under: every document
+    /// in it and its subfolders goes up, keeping the subfolders.
+    UploadFolder(PathBuf, String),
 }
 
 /// What every kind of account can do. Paths are relative to the account's
@@ -350,6 +368,11 @@ trait Backend {
     fn delete(&mut self, path: &str, id: &str) -> Result<(), String>;
     fn rename(&mut self, from: &str, id: &str, to: &str) -> Result<(), String>;
     fn mkdir(&mut self, path: &str) -> Result<(), String>;
+    /// Whether a folder has to exist before files go in it (S3 and B2 make
+    /// folders out of the file names themselves).
+    fn needs_folders(&self) -> bool {
+        true
+    }
 }
 
 fn connect(acct: &Account, secret: &str) -> Result<Box<dyn Backend>, String> {
@@ -477,9 +500,7 @@ pub fn spawn(acct: Account, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
             let _ = tx.send(e);
             repaint.request_repaint();
         };
-        if acct.kind != Kind::Folder {
-            send(CloudEvent::Status("Connecting…".into()));
-        }
+        send(CloudEvent::Status(stage_message(&acct)));
         let secret = if acct.kind.has_secret() {
             match secrets::get(&acct) {
                 Ok(s) => s,
@@ -492,8 +513,47 @@ pub fn spawn(acct: Account, op: CloudOp, tx: Sender<CloudEvent>, repaint: eframe
             Ok(b) => b,
             Err(e) => return send(CloudEvent::Error(e)),
         };
+        // SSH and B2 sign in while connecting; say that part worked.
+        if matches!(op, CloudOp::List(_)) && matches!(acct.kind, Kind::Ssh | Kind::B2) {
+            send(CloudEvent::Status("Signed in — reading the folder…".into()));
+        }
         send(run(&mut *backend, &acct, op, &send));
     });
+}
+
+/// What the worker is doing first, in words: "Connecting to nagasab over SSH…".
+fn stage_message(acct: &Account) -> String {
+    let host = || {
+        let a = acct.address.trim();
+        let a = a.split_once("://").map(|(_, r)| r).unwrap_or(a);
+        a.split('/').next().unwrap_or(a).to_string()
+    };
+    match acct.kind {
+        Kind::Folder => format!("Opening {}…", acct.address.trim()),
+        Kind::Ssh => format!("Connecting to {} over SSH…", host()),
+        Kind::B2 => "Signing in to Backblaze…".into(),
+        Kind::WebDav | Kind::S3 => format!("Contacting {}…", host()),
+    }
+}
+
+/// A plain-words hint for common network failures, if the message is one.
+pub(crate) fn network_hint(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    // First: ureq words a slow connection as "timeout: resolve".
+    if t.contains("timed out") || t.contains("timeout") {
+        Some("No answer in time — is the server on, and reachable from this network?")
+    } else if ["resolve", "lookup", "name or service", "dns", "no address"]
+        .iter()
+        .any(|k| t.contains(k))
+    {
+        Some("The address couldn't be found — check the host name.")
+    } else if t.contains("refused") {
+        Some("Nothing answered at that address and port — is the server running, and is the port right?")
+    } else if t.contains("unreachable") {
+        Some("That network can't be reached from here.")
+    } else {
+        None
+    }
 }
 
 /// Throttled progress: at most every 150 ms, with the speed since the last.
@@ -549,11 +609,17 @@ fn run(b: &mut dyn Backend, acct: &Account, op: CloudOp, send: &dyn Fn(CloudEven
             }
         }),
         CloudOp::Upload(local, path) => {
-            send(CloudEvent::Status(format!("Uploading {}…", last_part(&path))));
+            send(CloudEvent::Status(format!(
+                "Uploading {}…",
+                last_part(&path)
+            )));
             upload(b, &local, &path, send)
         }
         CloudOp::Download { path, size, open } => {
-            send(CloudEvent::Status(format!("Downloading {}…", last_part(&path))));
+            send(CloudEvent::Status(format!(
+                "Downloading {}…",
+                last_part(&path)
+            )));
             download(b, acct, &path, size, send).map(|(dest, bytes, secs)| CloudEvent::Downloaded {
                 path: dest,
                 bytes,
@@ -569,7 +635,10 @@ fn run(b: &mut dyn Backend, acct: &Account, op: CloudOp, send: &dyn Fn(CloudEven
                 .map(|()| CloudEvent::Deleted(items.len()))
         }
         CloudOp::Rename { from, id, to } => {
-            send(CloudEvent::Status(format!("Renaming to {}…", last_part(&to))));
+            send(CloudEvent::Status(format!(
+                "Renaming to {}…",
+                last_part(&to)
+            )));
             b.rename(&from, &id, &to).map(|()| {
                 // A downloaded copy follows the new name.
                 let from_local = local_path_for(&acct.id, &from);
@@ -588,6 +657,7 @@ fn run(b: &mut dyn Backend, acct: &Account, op: CloudOp, send: &dyn Fn(CloudEven
             })
         }
         CloudOp::MakeFolder(path) => b.mkdir(&path).map(|()| CloudEvent::FolderMade(path)),
+        CloudOp::UploadFolder(local, target) => upload_folder(b, &local, &target, send),
     };
     result.unwrap_or_else(CloudEvent::Error)
 }
@@ -612,6 +682,103 @@ fn upload(
     })
 }
 
+/// Every document under `dir` (subfolders too, hidden ones skipped, links
+/// to folders not followed): (file, path relative to `dir` with `/`, size).
+pub fn documents_in(dir: &Path) -> Vec<(PathBuf, String, u64)> {
+    fn walk(dir: &Path, rel: &str, out: &mut Vec<(PathBuf, String, u64)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            let path = join(rel, &name);
+            if meta.is_dir() {
+                walk(&e.path(), &path, out);
+            } else if is_document(&name) {
+                // A link to a file is fine; its size is the target's.
+                if let Ok(m) = std::fs::metadata(e.path()) {
+                    if m.is_file() {
+                        out.push((e.path(), path, m.len()));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out
+}
+
+fn upload_folder(
+    b: &mut dyn Backend,
+    local: &Path,
+    target: &str,
+    send: &dyn Fn(CloudEvent),
+) -> Result<CloudEvent, String> {
+    let name = local
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| local.display().to_string());
+    send(CloudEvent::Status(format!(
+        "Looking for documents in {name}…"
+    )));
+    let docs = documents_in(local);
+    if docs.is_empty() {
+        return Err(format!(
+            "There are no PDFs or ebooks in {name} or its subfolders"
+        ));
+    }
+    if b.needs_folders() {
+        // Parents before children; one that's already there is fine.
+        let mut dirs: Vec<String> = vec![target.to_string()];
+        for (_, rel, _) in &docs {
+            let mut d = parent(rel);
+            while !d.is_empty() {
+                dirs.push(join(target, d));
+                d = parent(d);
+            }
+        }
+        dirs.sort();
+        dirs.dedup();
+        for d in dirs.iter().filter(|d| !d.is_empty()) {
+            let _ = b.mkdir(d);
+        }
+    }
+    let total: u64 = docs.iter().map(|d| d.2).sum();
+    let n = docs.len();
+    let mut meter = Meter::new(send, total);
+    let mut before = 0u64;
+    let mut failed = Vec::new();
+    for (i, (file, rel, size)) in docs.iter().enumerate() {
+        send(CloudEvent::Status(format!(
+            "Uploading {} of {n}: {rel}",
+            i + 1
+        )));
+        let result = std::fs::read(file)
+            .map_err(|e| format!("couldn't read it: {e}"))
+            .and_then(|bytes| b.put(&join(target, rel), &bytes, &mut |d| meter.tick(before + d)));
+        if let Err(why) = result {
+            failed.push((rel.clone(), why));
+        }
+        before += size;
+    }
+    Ok(CloudEvent::FolderUploaded {
+        name,
+        files: n - failed.len(),
+        bytes: total,
+        secs: meter.secs(),
+        failed,
+    })
+}
+
 /// Downloads into a hidden part-file first, so a broken transfer never
 /// shows up as a downloaded document.
 fn download(
@@ -622,8 +789,12 @@ fn download(
     send: &dyn Fn(CloudEvent),
 ) -> Result<(PathBuf, u64, f64), String> {
     let dest = local_path_for(&acct.id, path);
-    let dir = dest.parent().map(Path::to_path_buf).unwrap_or_else(cache_dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    let dir = dest
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(cache_dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     let part = dir.join(format!(
         ".{}.part",
         dest.file_name().unwrap_or_default().to_string_lossy()
@@ -781,7 +952,10 @@ mod tests {
 
     #[test]
     fn percent_encoding() {
-        assert_eq!(percent_encode("plain-name_1.pdf", false), "plain-name_1.pdf");
+        assert_eq!(
+            percent_encode("plain-name_1.pdf", false),
+            "plain-name_1.pdf"
+        );
         assert_eq!(percent_encode("a b.pdf", false), "a%20b.pdf");
         assert_eq!(percent_encode("a/b.pdf", true), "a/b.pdf");
         assert_eq!(percent_encode("a/b.pdf", false), "a%2Fb.pdf");
@@ -815,6 +989,38 @@ mod tests {
         assert_eq!(parent("a.pdf"), "");
         assert_eq!(last_part("Math/Calc/"), "Calc");
         assert!(is_document("x.PDF") && is_document("b.epub") && !is_document("a.mp4"));
+    }
+
+    #[test]
+    fn network_hints() {
+        assert!(network_hint("timeout: resolve")
+            .unwrap()
+            .starts_with("No answer"));
+        assert!(network_hint("Could not resolve hostname x")
+            .unwrap()
+            .contains("couldn't be found"));
+        assert!(network_hint("Connection refused")
+            .unwrap()
+            .starts_with("Nothing answered"));
+        assert!(network_hint("403 Forbidden").is_none());
+    }
+
+    #[test]
+    fn folder_walk_keeps_documents_and_subfolders() {
+        let dir = std::env::temp_dir().join(format!("pv-walk-{}", new_id()));
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        for f in [
+            "top.pdf",
+            "a/b/deep.epub",
+            "a/notes.txt.bak",
+            ".hidden/x.pdf",
+        ] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let found: Vec<String> = documents_in(&dir).into_iter().map(|d| d.1).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, ["a/b/deep.epub", "top.pdf"]);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! cargo run --example cloud_probe -- some.pdf
 //! ```
 //!
+//! `PROBE_UPLOAD_DIR=<local folder>` uploads a whole folder and lists it.
 //! `PROBE_LIST=<folder>` only lists that folder ("" for the top) and changes
 //! nothing. Set `XDG_DATA_HOME` to a scratch folder: downloads land under it.
 //! Everything happens inside a `paperview-probe` folder on the account.
@@ -50,10 +51,45 @@ fn names(e: &CloudEvent) -> Vec<String> {
 }
 
 fn main() {
-    let acct: Account = serde_json::from_str(&std::env::var("PROBE_ACCOUNT").expect("PROBE_ACCOUNT"))
-        .expect("PROBE_ACCOUNT is an account as JSON");
+    let acct: Account =
+        serde_json::from_str(&std::env::var("PROBE_ACCOUNT").expect("PROBE_ACCOUNT"))
+            .expect("PROBE_ACCOUNT is an account as JSON");
     if let Ok(secret) = std::env::var("PROBE_SECRET") {
         cloud::secrets::remember(&acct.id, &secret);
+    }
+    // PROBE_UPLOAD_DIR=<local folder>: upload it into the top folder, then
+    // list what arrived.
+    if let Ok(dir) = std::env::var("PROBE_UPLOAD_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        match run(&acct, CloudOp::UploadFolder(dir, name.clone())) {
+            Ok(CloudEvent::FolderUploaded {
+                files,
+                failed,
+                secs,
+                ..
+            }) => {
+                println!("uploaded {files} in {secs:.1}s, failed {failed:?}");
+            }
+            Ok(_) => println!("unexpected reply"),
+            Err(e) => {
+                eprintln!("FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+        let mut todo = vec![name];
+        while let Some(d) = todo.pop() {
+            if let Ok(CloudEvent::Listed { files, .. }) = run(&acct, CloudOp::List(d)) {
+                for f in files {
+                    if f.is_dir {
+                        todo.push(f.path);
+                    } else {
+                        println!("  {} ({} B)", f.path, f.size);
+                    }
+                }
+            }
+        }
+        return;
     }
     // PROBE_LIST=dir: only list that folder (read-only).
     if let Ok(dir) = std::env::var("PROBE_LIST") {
@@ -105,7 +141,9 @@ fn main() {
             open: false,
         },
     ) {
-        CloudEvent::Downloaded { path, bytes, secs, .. } => {
+        CloudEvent::Downloaded {
+            path, bytes, secs, ..
+        } => {
             let got = std::fs::read(&path).expect("downloaded file");
             assert_eq!(got, original, "downloaded bytes differ");
             eprintln!(
@@ -138,7 +176,10 @@ fn main() {
     assert!(names(&after).iter().any(|n| n.starts_with(&second)));
     assert!(!names(&after).iter().any(|n| n.starts_with(&first)));
 
-    step("delete", CloudOp::Delete(vec![(second.clone(), String::new())]));
+    step(
+        "delete",
+        CloudOp::Delete(vec![(second.clone(), String::new())]),
+    );
     let last = step("list once more", CloudOp::List(dir.into()));
     eprintln!("  {:?}", names(&last));
     assert!(names(&last).is_empty(), "folder should be empty");

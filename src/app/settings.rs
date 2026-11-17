@@ -2,8 +2,11 @@
 
 use eframe::egui::{self, RichText, Stroke};
 
-use super::{CloudOp, HomeScreen, ViewerApp};
-use crate::cloud::{self, Account, Kind};
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
+
+use super::{now_ts, CloudOp, HomeScreen, ViewerApp};
+use crate::cloud::{self, Account, CloudEvent, CloudFile, Kind};
 use crate::ui::theme::{self, Skin, ThemeChoice};
 use crate::ui::widgets as w;
 
@@ -345,6 +348,43 @@ pub(super) struct AccountEditor {
     /// A new password / secret key; empty keeps the saved one.
     secret: String,
     show_secret: bool,
+    /// Why the last connection check failed (nothing was saved).
+    failed: Option<String>,
+}
+
+/// A connection check running in the background: lists the account's top
+/// folder, the same thing the Cloud tab does first.
+pub(super) struct CloudTest {
+    /// The account as it will be saved.
+    account: Account,
+    /// A newly typed secret; kept only if the account is saved.
+    secret: Option<String>,
+    rx: Receiver<CloudEvent>,
+    started: Instant,
+    /// What the worker said it's doing.
+    stage: String,
+    /// From the account form: save the account once it connects.
+    from_form: bool,
+}
+
+/// What an account last said: connected (with what's there) or why not.
+pub(super) struct Health {
+    ok: bool,
+    text: String,
+    ts: i64,
+}
+
+/// "3 documents and 2 folders", "empty so far".
+pub(super) fn listing_summary(files: &[CloudFile]) -> String {
+    let dirs = files.iter().filter(|f| f.is_dir).count();
+    let docs = files.len() - dirs;
+    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    match (docs, dirs) {
+        (0, 0) => "empty so far".to_string(),
+        (d, 0) => plural(d, "document"),
+        (0, f) => plural(f, "folder"),
+        (d, f) => format!("{} and {}", plural(d, "document"), plural(f, "folder")),
+    }
 }
 
 impl AccountEditor {
@@ -357,6 +397,7 @@ impl AccountEditor {
             },
             secret: String::new(),
             show_secret: false,
+            failed: None,
         }
     }
 }
@@ -386,24 +427,73 @@ impl ViewerApp {
         let mut use_id: Option<String> = None;
         let mut edit_id: Option<String> = None;
         let mut remove_id: Option<String> = None;
+        let mut test_id: Option<String> = None;
+        let error = ui.visuals().error_fg_color;
         for acct in &self.cloud_accounts {
             let current = acct.id == self.cloud_current;
             let mut sub = acct.summary();
             if current && self.cloud_accounts.len() > 1 {
                 sub.push_str(" · shown in the Cloud tab");
             }
-            w::row(ui, false, Some(acct.kind.glyph()), &acct.name, Some(&sub), |ui| {
-                if w::inline_button(ui, "Remove", true).clicked() {
-                    remove_id = Some(acct.id.clone());
-                }
-                if w::inline_button(ui, "Edit", self.cloud_editor.is_none()).clicked() {
-                    edit_id = Some(acct.id.clone());
-                }
-                if !current && w::inline_button(ui, "Show", acct.ready()).clicked() {
-                    use_id = Some(acct.id.clone());
-                }
-            });
+            let testing = self
+                .cloud_test
+                .as_ref()
+                .filter(|t| !t.from_form && t.account.id == acct.id);
+            w::row(
+                ui,
+                false,
+                Some(acct.kind.glyph()),
+                &acct.name,
+                Some(&sub),
+                |ui| {
+                    if w::inline_button(ui, "Remove", true).clicked() {
+                        remove_id = Some(acct.id.clone());
+                    }
+                    if w::inline_button(ui, "Edit", self.cloud_editor.is_none()).clicked() {
+                        edit_id = Some(acct.id.clone());
+                    }
+                    if w::inline_button(ui, "Test", self.cloud_test.is_none() && acct.ready())
+                        .on_hover_text("Connect now and say what happened")
+                        .clicked()
+                    {
+                        test_id = Some(acct.id.clone());
+                    }
+                    if !current && w::inline_button(ui, "Show", acct.ready()).clicked() {
+                        use_id = Some(acct.id.clone());
+                    }
+                },
+            );
+            // What the account last said: connecting now, connected, or why not.
+            let line = match (testing, self.cloud_health.get(&acct.id)) {
+                (Some(t), _) => Some((
+                    format!("{}  {} s", t.stage, t.started.elapsed().as_secs()),
+                    p.muted,
+                    true,
+                )),
+                (None, Some(h)) if h.ok => Some((
+                    format!("✔ {} · checked {}", h.text, super::fmt_time(h.ts)),
+                    p.accent,
+                    false,
+                )),
+                (None, Some(h)) => Some((format!("Couldn't connect: {}", h.text), error, false)),
+                (None, None) => None,
+            };
+            if let Some((text, color, busy)) = line {
+                ui.horizontal(|ui| {
+                    ui.add_space(38.0);
+                    if busy {
+                        ui.spinner();
+                    }
+                    ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+                });
+                ui.add_space(6.0);
+            }
             w::hairline(ui);
+        }
+        if let Some(id) = test_id {
+            if let Some(acct) = self.cloud_accounts.iter().find(|a| a.id == id).cloned() {
+                self.start_test(ctx, acct, None, false);
+            }
         }
         if self.cloud_accounts.is_empty() && self.cloud_editor.is_none() {
             ui.add_space(4.0);
@@ -425,6 +515,7 @@ impl ViewerApp {
                     draft: acct.clone(),
                     secret: String::new(),
                     show_secret: false,
+                    failed: None,
                 });
             }
         }
@@ -507,13 +598,20 @@ impl ViewerApp {
         let Some(mut ed) = self.cloud_editor.take() else {
             return;
         };
-        let mut save = false;
         let mut cancel = false;
         let has_saved_secret = ed.editing.as_ref().is_some_and(|id| {
             self.cloud_accounts
                 .iter()
                 .any(|a| a.id == *id && a.kind == ed.draft.kind)
         });
+        let mut test = false;
+        let mut save_anyway = false;
+        let mut stop = false;
+        let testing = self
+            .cloud_test
+            .as_ref()
+            .filter(|t| t.from_form)
+            .map(|t| (t.stage.clone(), t.started.elapsed().as_secs()));
         ui.add_space(12.0);
         egui::Frame::NONE
             .fill(p.surface)
@@ -521,164 +619,180 @@ impl ViewerApp {
             .corner_radius(6)
             .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
-                let title = if ed.editing.is_some() {
-                    format!("Edit {}", ed.draft.name)
-                } else {
-                    "Add an account".to_string()
-                };
-                ui.label(RichText::new(title).text_style(theme::title()).color(p.ink));
-                ui.add_space(8.0);
-                if ed.editing.is_none() {
-                    let labels: Vec<&str> = Kind::ALL.iter().map(|k| k.label()).collect();
-                    let sel = Kind::ALL.iter().position(|k| *k == ed.draft.kind).unwrap_or(0);
-                    if let Some(i) = w::choice_chips(ui, &labels, sel) {
-                        ed.draft.kind = Kind::ALL[i];
-                    }
+                ui.add_enabled_ui(testing.is_none(), |ui| {
+                    let title = if ed.editing.is_some() {
+                        format!("Edit {}", ed.draft.name)
+                    } else {
+                        "Add an account".to_string()
+                    };
+                    ui.label(RichText::new(title).text_style(theme::title()).color(p.ink));
                     ui.add_space(8.0);
-                }
-                let (blurb, link) = kind_blurb(ed.draft.kind);
-                ui.label(RichText::new(blurb).color(p.muted));
-                if let Some((text, url)) = link {
-                    ui.hyperlink_to(RichText::new(text).color(p.accent), url);
-                }
-                ui.add_space(10.0);
+                    if ed.editing.is_none() {
+                        let labels: Vec<&str> = Kind::ALL.iter().map(|k| k.label()).collect();
+                        let sel = Kind::ALL
+                            .iter()
+                            .position(|k| *k == ed.draft.kind)
+                            .unwrap_or(0);
+                        if let Some(i) = w::choice_chips(ui, &labels, sel) {
+                            ed.draft.kind = Kind::ALL[i];
+                        }
+                        ui.add_space(8.0);
+                    }
+                    let (blurb, link) = kind_blurb(ed.draft.kind);
+                    ui.label(RichText::new(blurb).color(p.muted));
+                    if let Some((text, url)) = link {
+                        ui.hyperlink_to(RichText::new(text).color(p.accent), url);
+                    }
+                    ui.add_space(10.0);
 
-                const W: f32 = 380.0;
-                let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
-                    w::field_label(ui, label);
-                    w::field(ui, value, hint, false, W);
-                    ui.add_space(6.0);
-                };
-                let d = &mut ed.draft;
-                field(ui, "Name", &mut d.name, name_hint(d.kind));
-                match d.kind {
-                    Kind::Folder => {
-                        w::field_label(ui, "Folder");
-                        ui.horizontal(|ui| {
-                            w::field(ui, &mut d.address, "e.g. /mnt/nas/Documents", false, W);
-                            if w::inline_button(ui, "Choose…", true).clicked() {
-                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                    d.address = dir.to_string_lossy().into_owned();
+                    const W: f32 = 380.0;
+                    let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
+                        w::field_label(ui, label);
+                        w::field(ui, value, hint, false, W);
+                        ui.add_space(6.0);
+                    };
+                    let d = &mut ed.draft;
+                    field(ui, "Name", &mut d.name, name_hint(d.kind));
+                    match d.kind {
+                        Kind::Folder => {
+                            w::field_label(ui, "Folder");
+                            ui.horizontal(|ui| {
+                                w::field(ui, &mut d.address, "e.g. /mnt/nas/Documents", false, W);
+                                if w::inline_button(ui, "Choose…", true).clicked() {
+                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                        d.address = dir.to_string_lossy().into_owned();
+                                    }
                                 }
+                            });
+                            ui.add_space(6.0);
+                        }
+                        Kind::WebDav => {
+                            field(
+                                ui,
+                                "Server address",
+                                &mut d.address,
+                                "https://nas.local:5006/PaperView",
+                            );
+                            field(ui, "User name", &mut d.user, "");
+                        }
+                        Kind::S3 => {
+                            field(
+                                ui,
+                                "Endpoint",
+                                &mut d.address,
+                                "https://<account id>.r2.cloudflarestorage.com",
+                            );
+                            field(
+                                ui,
+                                "Region",
+                                &mut d.region,
+                                "“auto” for R2, e.g. eu-central-1 — empty means us-east-1",
+                            );
+                            field(ui, "Bucket", &mut d.bucket, "");
+                            field(ui, "Access key ID", &mut d.user, "");
+                        }
+                        Kind::B2 => {
+                            field(ui, "Key ID", &mut d.user, "e.g. 005a1b2c3d4e5f60000000001");
+                            field(
+                                ui,
+                                "Bucket name",
+                                &mut d.bucket,
+                                "Exactly as it appears in Backblaze",
+                            );
+                        }
+                        Kind::Ssh => {
+                            field(
+                                ui,
+                                "Host",
+                                &mut d.address,
+                                "A host name or an alias from ~/.ssh/config",
+                            );
+                            field(
+                                ui,
+                                "User (optional)",
+                                &mut d.user,
+                                "When not set in ~/.ssh/config",
+                            );
+                            field(ui, "Port (optional)", &mut d.port, "22");
+                        }
+                    }
+                    if d.kind.has_secret() {
+                        let label = match d.kind {
+                            Kind::S3 => "Secret access key",
+                            Kind::B2 => "Application key",
+                            _ => "Password",
+                        };
+                        let hint = if has_saved_secret {
+                            "Saved — leave empty to keep it"
+                        } else if d.kind == Kind::B2 {
+                            "Starts with K — shown once, when the key is created"
+                        } else {
+                            ""
+                        };
+                        w::field_label(ui, label);
+                        ui.horizontal(|ui| {
+                            w::field(ui, &mut ed.secret, hint, !ed.show_secret, W);
+                            if w::inline_button(
+                                ui,
+                                if ed.show_secret { "Hide" } else { "Show" },
+                                true,
+                            )
+                            .clicked()
+                            {
+                                ed.show_secret = !ed.show_secret;
                             }
                         });
+                        let key = ed.secret.trim();
+                        if ed.draft.kind == Kind::B2 && !key.is_empty() && !key.starts_with('K') {
+                            ui.label(
+                                RichText::new(
+                                    "Application keys start with “K” — this looks like the Key ID.",
+                                )
+                                .small()
+                                .color(ui.visuals().error_fg_color),
+                            );
+                        }
                         ui.add_space(6.0);
                     }
-                    Kind::WebDav => {
-                        field(
+                    let d = &mut ed.draft;
+                    match d.kind {
+                        Kind::S3 | Kind::B2 => field(
                             ui,
-                            "Server address",
-                            &mut d.address,
-                            "https://nas.local:5006/PaperView",
-                        );
-                        field(ui, "User name", &mut d.user, "");
+                            "Folder in the bucket (optional)",
+                            &mut d.folder,
+                            "Empty uses the whole bucket",
+                        ),
+                        Kind::Ssh => field(
+                            ui,
+                            "Folder on the server",
+                            &mut d.folder,
+                            "PaperView (in your home folder) — made if it's missing",
+                        ),
+                        _ => {}
                     }
-                    Kind::S3 => {
-                        field(
-                            ui,
-                            "Endpoint",
-                            &mut d.address,
-                            "https://<account id>.r2.cloudflarestorage.com",
+                    if matches!(d.kind, Kind::WebDav | Kind::S3) {
+                        ui.checkbox(
+                            &mut d.insecure_tls,
+                            RichText::new(
+                                "Trust a self-signed certificate (a NAS on your own network)",
+                            )
+                            .color(p.ink),
                         );
-                        field(
-                            ui,
-                            "Region",
-                            &mut d.region,
-                            "“auto” for R2, e.g. eu-central-1 — empty means us-east-1",
-                        );
-                        field(ui, "Bucket", &mut d.bucket, "");
-                        field(ui, "Access key ID", &mut d.user, "");
+                        ui.add_space(6.0);
                     }
-                    Kind::B2 => {
-                        field(ui, "Key ID", &mut d.user, "e.g. 005a1b2c3d4e5f60000000001");
-                        field(ui, "Bucket name", &mut d.bucket, "Exactly as it appears in Backblaze");
-                    }
-                    Kind::Ssh => {
-                        field(
-                            ui,
-                            "Host",
-                            &mut d.address,
-                            "A host name or an alias from ~/.ssh/config",
-                        );
-                        field(
-                            ui,
-                            "User (optional)",
-                            &mut d.user,
-                            "When not set in ~/.ssh/config",
-                        );
-                        field(ui, "Port (optional)", &mut d.port, "22");
-                    }
-                }
-                if d.kind.has_secret() {
-                    let label = match d.kind {
-                        Kind::S3 => "Secret access key",
-                        Kind::B2 => "Application key",
-                        _ => "Password",
-                    };
-                    let hint = if has_saved_secret {
-                        "Saved — leave empty to keep it"
-                    } else if d.kind == Kind::B2 {
-                        "Starts with K — shown once, when the key is created"
-                    } else {
-                        ""
-                    };
-                    w::field_label(ui, label);
-                    ui.horizontal(|ui| {
-                        w::field(ui, &mut ed.secret, hint, !ed.show_secret, W);
-                        if w::inline_button(ui, if ed.show_secret { "Hide" } else { "Show" }, true)
-                            .clicked()
-                        {
-                            ed.show_secret = !ed.show_secret;
-                        }
-                    });
-                    let key = ed.secret.trim();
-                    if ed.draft.kind == Kind::B2 && !key.is_empty() && !key.starts_with('K') {
+                    if d.kind == Kind::Ssh {
                         ui.label(
                             RichText::new(
-                                "Application keys start with “K” — this looks like the Key ID.",
-                            )
-                            .small()
-                            .color(ui.visuals().error_fg_color),
-                        );
-                    }
-                    ui.add_space(6.0);
-                }
-                let d = &mut ed.draft;
-                match d.kind {
-                    Kind::S3 | Kind::B2 => field(
-                        ui,
-                        "Folder in the bucket (optional)",
-                        &mut d.folder,
-                        "Empty uses the whole bucket",
-                    ),
-                    Kind::Ssh => field(
-                        ui,
-                        "Folder on the server",
-                        &mut d.folder,
-                        "PaperView (in your home folder) — made if it's missing",
-                    ),
-                    _ => {}
-                }
-                if matches!(d.kind, Kind::WebDav | Kind::S3) {
-                    ui.checkbox(
-                        &mut d.insecure_tls,
-                        RichText::new("Trust a self-signed certificate (a NAS on your own network)")
-                            .color(p.ink),
-                    );
-                    ui.add_space(6.0);
-                }
-                if d.kind == Kind::Ssh {
-                    ui.label(
-                        RichText::new(
-                            "Signs in with your SSH keys and ~/.ssh/config, like ssh in a \
+                                "Signs in with your SSH keys and ~/.ssh/config, like ssh in a \
                              terminal; no password is stored. A new server's key is accepted \
                              the first time.",
-                        )
-                        .small()
-                        .color(p.muted),
-                    );
-                    ui.add_space(6.0);
-                }
+                            )
+                            .small()
+                            .color(p.muted),
+                        );
+                        ui.add_space(6.0);
+                    }
+                });
 
                 let needs_secret = ed.draft.kind.has_secret()
                     && ed.draft.kind != Kind::WebDav
@@ -686,50 +800,180 @@ impl ViewerApp {
                     && ed.secret.trim().is_empty();
                 let ok = ed.draft.ready() && !needs_secret;
                 ui.add_space(6.0);
+                if let Some((stage, secs)) = &testing {
+                    // Checking: what's happening, and for how long.
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(format!("{stage}  {secs} s")).color(p.ink));
+                    });
+                    ui.label(
+                        RichText::new(
+                            "PaperView saves the account once it answers. If nothing answers, \
+                             it gives up within about 30 seconds.",
+                        )
+                        .small()
+                        .color(p.muted),
+                    );
+                    ui.add_space(6.0);
+                    if w::outlined_button(ui, "Stop", true).clicked() {
+                        stop = true;
+                    }
+                    return;
+                }
+                if let Some(why) = &ed.failed {
+                    let error = ui.visuals().error_fg_color;
+                    ui.label(
+                        RichText::new("Couldn't connect — nothing was saved")
+                            .family(theme::medium())
+                            .color(error),
+                    );
+                    ui.add(egui::Label::new(RichText::new(why).small().color(error)).wrap());
+                    ui.label(
+                        RichText::new(
+                            "Fix the details and try again, or save it anyway to connect later \
+                             (say, when the NAS is on).",
+                        )
+                        .small()
+                        .color(p.muted),
+                    );
+                    ui.add_space(8.0);
+                }
                 ui.horizontal(|ui| {
-                    if w::primary_button(ui, "Save and connect", ok).clicked() {
-                        save = true;
+                    let label = if ed.failed.is_some() {
+                        "Try again"
+                    } else {
+                        "Connect and save"
+                    };
+                    if w::primary_button(ui, label, ok).clicked() {
+                        test = true;
+                    }
+                    if ed.failed.is_some() && w::outlined_button(ui, "Save anyway", ok).clicked() {
+                        save_anyway = true;
                     }
                     if w::outlined_button(ui, "Cancel", true).clicked() {
                         cancel = true;
                     }
                 });
             });
-        if save {
-            self.save_account(ctx, ed);
-        } else if !cancel {
+        if test {
+            let (acct, secret) = prepare_account(&ed);
+            ed.failed = None;
+            self.start_test(ctx, acct, secret, true);
+            self.cloud_editor = Some(ed);
+        } else if save_anyway {
+            let (acct, secret) = prepare_account(&ed);
+            self.commit_account(ctx, acct, secret, None);
+        } else if stop {
+            self.cloud_test = None;
+            self.cloud_editor = Some(ed);
+        } else if cancel {
+            if self.cloud_test.as_ref().is_some_and(|t| t.from_form) {
+                self.cloud_test = None;
+            }
+        } else {
             self.cloud_editor = Some(ed);
         }
     }
 
-    fn save_account(&mut self, ctx: &egui::Context, ed: AccountEditor) {
-        let mut acct = ed.draft.trimmed();
-        if acct.name.is_empty() {
-            acct.name = match acct.kind {
-                Kind::Ssh | Kind::WebDav if !acct.address.is_empty() => acct
-                    .address
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split(['/', ':'])
-                    .next()
-                    .unwrap_or("")
-                    .to_string(),
-                Kind::Folder => crate::cloud::expand_home(&acct.address)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Folder".into()),
-                k => k.label().to_string(),
-            };
+    /// Starts a connection check of `account` (with a newly typed secret,
+    /// if any). One at a time.
+    fn start_test(
+        &mut self,
+        ctx: &egui::Context,
+        account: Account,
+        secret: Option<String>,
+        from_form: bool,
+    ) {
+        let mut probe = account.clone();
+        if let Some(s) = &secret {
+            probe.plain_secret = Some(s.clone());
         }
-        acct.id = ed.editing.clone().unwrap_or_else(crate::cloud::new_id);
-        let secret = ed.secret.trim().to_string();
-        if !secret.is_empty() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud::spawn(probe, CloudOp::List(String::new()), tx, ctx.clone());
+        self.cloud_test = Some(CloudTest {
+            account,
+            secret,
+            rx,
+            started: Instant::now(),
+            stage: "Starting…".into(),
+            from_form,
+        });
+    }
+
+    /// Follows a running connection check; when it ends, records the result
+    /// and (from the form) saves the account if it connected.
+    pub(super) fn poll_cloud_test(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.cloud_test.as_mut() else {
+            return;
+        };
+        let mut done = None;
+        while let Ok(event) = t.rx.try_recv() {
+            match event {
+                CloudEvent::Status(s) => t.stage = s,
+                CloudEvent::Listed { files, .. } => done = Some(Ok(files)),
+                CloudEvent::Error(e) => done = Some(Err(e)),
+                _ => {}
+            }
+        }
+        // Keep the seconds counting.
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        let Some(result) = done else {
+            return;
+        };
+        let Some(t) = self.cloud_test.take() else {
+            return;
+        };
+        let name = t.account.name.clone();
+        let id = t.account.id.clone();
+        match result {
+            Ok(files) => {
+                let summary = listing_summary(&files);
+                self.note_health(&id, true, format!("Connected · {summary}"));
+                self.toast(format!("Connected to {name} — {summary}"));
+                if t.from_form {
+                    self.cloud_editor = None;
+                    self.commit_account(ctx, t.account, t.secret, Some(files));
+                }
+            }
+            Err(why) => {
+                self.note_health(&id, false, why.clone());
+                if t.from_form {
+                    if let Some(ed) = self.cloud_editor.as_mut() {
+                        ed.failed = Some(why);
+                    }
+                } else {
+                    self.toast(format!("Couldn't connect to {name}"));
+                }
+            }
+        }
+    }
+
+    pub(super) fn note_health(&mut self, id: &str, ok: bool, text: String) {
+        self.cloud_health.insert(
+            id.to_string(),
+            Health {
+                ok,
+                text,
+                ts: now_ts(),
+            },
+        );
+    }
+
+    /// Saves an account (and its new secret) and shows it on the Cloud tab;
+    /// `listing` is its top folder when a check just read it.
+    fn commit_account(
+        &mut self,
+        ctx: &egui::Context,
+        mut acct: Account,
+        secret: Option<String>,
+        listing: Option<Vec<CloudFile>>,
+    ) {
+        if let Some(secret) = secret {
             // A new secret goes to the keyring (the settings-file copy, if
             // there was one, is dropped; it comes back if the keyring fails).
             acct.plain_secret = None;
             self.persist_secret(ctx, acct.id.clone(), secret);
         }
-        let name = acct.name.clone();
         let id = acct.id.clone();
         match self.cloud_accounts.iter_mut().find(|a| a.id == id) {
             Some(slot) => *slot = acct,
@@ -737,8 +981,20 @@ impl ViewerApp {
         }
         self.switch_account(id);
         self.cloud_enabled = true;
-        self.start_cloud_op(ctx, CloudOp::List(String::new()));
-        self.toast(format!("Connecting to {name}…"));
+        match listing {
+            Some(files) => {
+                self.cloud_top = files
+                    .iter()
+                    .filter(|f| !f.is_dir)
+                    .map(|f| (f.name.clone(), f.size))
+                    .collect();
+                self.cloud_files = files;
+                self.cloud_listed = true;
+                self.cloud_refreshed = Some(now_ts());
+                self.refresh_local_docs();
+            }
+            None => self.start_cloud_op(ctx, CloudOp::List(String::new())),
+        }
     }
 
     /// Forgets an account, its saved secret and its downloads.
@@ -762,6 +1018,32 @@ impl ViewerApp {
         self.refresh_local_docs();
         self.toast(format!("Removed {}", acct.name));
     }
+}
+
+/// The account as the form describes it — named, with an id — and the
+/// newly typed secret, if any.
+fn prepare_account(ed: &AccountEditor) -> (Account, Option<String>) {
+    let mut acct = ed.draft.clone().trimmed();
+    if acct.name.is_empty() {
+        acct.name = match acct.kind {
+            Kind::Ssh | Kind::WebDav if !acct.address.is_empty() => acct
+                .address
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split(['/', ':'])
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            Kind::Folder => cloud::expand_home(&acct.address)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Folder".into()),
+            k => k.label().to_string(),
+        };
+    }
+    acct.id = ed.editing.clone().unwrap_or_else(cloud::new_id);
+    let secret = ed.secret.trim().to_string();
+    (acct, (!secret.is_empty()).then_some(secret))
 }
 
 fn kind_blurb(kind: Kind) -> (&'static str, Option<(&'static str, &'static str)>) {

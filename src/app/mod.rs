@@ -502,6 +502,12 @@ pub struct ViewerApp {
     cloud_top: Vec<(String, u64)>,
     /// The account form open in Settings.
     cloud_editor: Option<settings::AccountEditor>,
+    /// A connection check running (from the form or an account's Test).
+    cloud_test: Option<settings::CloudTest>,
+    /// The last thing heard from each account this session, by id.
+    cloud_health: std::collections::HashMap<String, settings::Health>,
+    /// When the running cloud op started (for "… 6 s").
+    cloud_op_started: Option<Instant>,
     /// Live transfer progress: (done, total, bytes/sec).
     cloud_progress: Option<(u64, u64, f64)>,
     /// Last measured speeds: (bytes/sec, unix ts).
@@ -681,6 +687,9 @@ impl ViewerApp {
             cloud_rx,
             cloud_top: Vec::new(),
             cloud_editor: None,
+            cloud_test: None,
+            cloud_health: Default::default(),
+            cloud_op_started: None,
             cloud_progress: None,
             cloud_last_dl: None,
             cloud_last_ul: None,
@@ -1513,6 +1522,7 @@ impl ViewerApp {
     fn run_cloud_op(&mut self, ctx: &egui::Context, acct: Account, op: CloudOp) {
         self.cloud_busy = true;
         self.cloud_status = None;
+        self.cloud_op_started = Some(Instant::now());
         cloud::spawn(acct, op, self.cloud_tx.clone(), ctx.clone());
     }
 
@@ -1523,6 +1533,33 @@ impl ViewerApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         CloudOp::Upload(path, cloud::join(&self.cloud_dir, &name))
+    }
+
+    /// Uploads a local folder — every document in it and its subfolders —
+    /// into the folder being shown, keeping its subfolders.
+    pub(super) fn upload_folder(&mut self, ctx: &egui::Context, dir: PathBuf) {
+        let Some(acct) = self.current_account() else {
+            return;
+        };
+        // A Folder account's own folder can't go into itself (or hold it).
+        if let Some(root) = acct.local_root() {
+            if dir.starts_with(&root) || root.starts_with(&dir) {
+                self.toast(format!("That folder is part of {} already", acct.name));
+                return;
+            }
+        }
+        if dir.starts_with(cloud::cache_dir()) {
+            self.toast("Those are downloads from the cloud already");
+            return;
+        }
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let place = self.account_name();
+        let target = cloud::join(&self.cloud_dir, &name);
+        self.toast(format!("Uploading the folder {name} to {place}…"));
+        self.start_cloud_op(ctx, CloudOp::UploadFolder(dir, target));
     }
 
     /// Shows another account (or the same one from its top folder).
@@ -1563,7 +1600,13 @@ impl ViewerApp {
 
     /// The single Backblaze bucket of earlier versions becomes an account;
     /// its downloads (and Recents pointing at them) move into its folder.
-    fn adopt_legacy_b2(&mut self, ctx: &egui::Context, key_id: String, app_key: String, bucket: String) {
+    fn adopt_legacy_b2(
+        &mut self,
+        ctx: &egui::Context,
+        key_id: String,
+        app_key: String,
+        bucket: String,
+    ) {
         // A fixed id: if the app quits before settings are saved, a second
         // migration finds the same keyring entry and download folder.
         let acct = Account {
@@ -2147,17 +2190,22 @@ impl ViewerApp {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        // A dropped folder joins the Library; files go on as before.
+        // A dropped folder joins the Library — or, on the Cloud tab, is
+        // uploaded with everything in it; files go on as before.
         let (dirs, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
             dropped.into_iter().partition(|p| p.is_dir());
+        let upload_mode = self.doc.is_none()
+            && self.home == HomeScreen::Library
+            && self.landing_tab == LandingTab::Saved
+            && self.cloud_active();
         for dir in dirs {
-            self.add_folder(dir);
+            if upload_mode {
+                self.upload_folder(ctx, dir);
+            } else {
+                self.add_folder(dir);
+            }
         }
         if !dropped.is_empty() {
-            let upload_mode = self.doc.is_none()
-                && self.home == HomeScreen::Library
-                && self.landing_tab == LandingTab::Saved
-                && self.cloud_active();
             if upload_mode {
                 let docs: Vec<PathBuf> = dropped
                     .iter()
@@ -3259,10 +3307,18 @@ impl eframe::App for ViewerApp {
             if event.is_terminal() {
                 self.cloud_busy = false;
                 self.cloud_progress = None;
+                self.cloud_op_started = None;
             }
             match event {
                 CloudEvent::Status(s) => self.cloud_status = Some(s),
-                CloudEvent::Error(e) => self.cloud_status = Some(e),
+                CloudEvent::Error(e) => {
+                    // Nothing listed yet: this is why the account isn't reachable.
+                    if !self.cloud_listed {
+                        let id = self.cloud_current.clone();
+                        self.note_health(&id, false, e.clone());
+                    }
+                    self.cloud_status = Some(e);
+                }
                 CloudEvent::Listed {
                     account,
                     dir,
@@ -3272,6 +3328,11 @@ impl eframe::App for ViewerApp {
                         continue;
                     }
                     if dir.is_empty() {
+                        self.note_health(
+                            &account,
+                            true,
+                            format!("Connected · {}", settings::listing_summary(&files)),
+                        );
                         self.cloud_top = files
                             .iter()
                             .filter(|f| !f.is_dir)
@@ -3340,6 +3401,38 @@ impl eframe::App for ViewerApp {
                     relist = self.cloud_queue.is_empty();
                     refresh_local = true;
                 }
+                CloudEvent::FolderUploaded {
+                    name,
+                    files,
+                    bytes,
+                    secs,
+                    failed,
+                } => {
+                    self.cloud_last_ul = Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                    let docs = |n: usize| format!("{n} document{}", if n == 1 { "" } else { "s" });
+                    if failed.is_empty() {
+                        self.cloud_status = Some(format!("Uploaded {} from {name}", docs(files)));
+                        self.toast(format!("Uploaded {} from {name}", docs(files)));
+                    } else {
+                        let list: Vec<String> = failed
+                            .iter()
+                            .take(3)
+                            .map(|(path, why)| format!("{path} ({why})"))
+                            .collect();
+                        let more = match failed.len() {
+                            n if n > 3 => format!(" and {} more", n - 3),
+                            _ => String::new(),
+                        };
+                        self.cloud_status = Some(format!(
+                            "Uploaded {} from {name}; {} didn't go up: {}{more}",
+                            docs(files),
+                            failed.len(),
+                            list.join("; ")
+                        ));
+                        self.toast(format!("{} from {name} didn't upload", docs(failed.len())));
+                    }
+                    relist = self.cloud_queue.is_empty();
+                }
                 CloudEvent::FolderMade(path) => {
                     self.cloud_status = None;
                     self.toast(format!("Made the folder {}", cloud::last_part(&path)));
@@ -3352,7 +3445,10 @@ impl eframe::App for ViewerApp {
                 } => {
                     if let Some(a) = self.cloud_accounts.iter_mut().find(|a| a.id == account) {
                         a.plain_secret = Some(secret);
-                        eprintln!("paperview: {why}; keeping {}'s secret in the settings file", a.name);
+                        eprintln!(
+                            "paperview: {why}; keeping {}'s secret in the settings file",
+                            a.name
+                        );
                     }
                 }
             }
@@ -3360,6 +3456,7 @@ impl eframe::App for ViewerApp {
         if refresh_local {
             self.refresh_local_docs();
         }
+        self.poll_cloud_test(&ctx);
         // Run the next queued op, or refresh the listing after a batch.
         if !self.cloud_busy {
             if let Some((acct, op)) = self.cloud_queue.pop_front() {

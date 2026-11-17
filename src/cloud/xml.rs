@@ -29,9 +29,13 @@ impl Node {
 
     /// The first descendant called `name`, depth first.
     pub fn find(&self, name: &str) -> Option<&Node> {
-        self.children
-            .iter()
-            .find_map(|c| if c.name == name { Some(c) } else { c.find(name) })
+        self.children.iter().find_map(|c| {
+            if c.name == name {
+                Some(c)
+            } else {
+                c.find(name)
+            }
+        })
     }
 }
 

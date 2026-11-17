@@ -36,7 +36,9 @@ impl S3 {
         };
         let host = rest.split('/').next().unwrap_or("").to_string();
         if host.is_empty() {
-            return Err("The endpoint needs a host, e.g. https://s3.eu-central-1.wasabisys.com".into());
+            return Err(
+                "The endpoint needs a host, e.g. https://s3.eu-central-1.wasabisys.com".into(),
+            );
         }
         let bucket = acct.bucket.trim().to_string();
         // AWS itself wants bucket.host; everything else is happiest with
@@ -155,7 +157,9 @@ impl S3 {
                 self.agent.run(req)
             }
             None => {
-                let req = req.body(body.to_vec()).map_err(|e| format!("{what}: {e}"))?;
+                let req = req
+                    .body(body.to_vec())
+                    .map_err(|e| format!("{what}: {e}"))?;
                 self.agent.run(req)
             }
         }
@@ -218,7 +222,15 @@ impl Backend for S3 {
         out: &mut dyn std::io::Write,
         progress: &mut dyn FnMut(u64),
     ) -> Result<u64, String> {
-        let mut resp = self.request("GET", &self.key(path), &[], &[], &[], None, "Download failed")?;
+        let mut resp = self.request(
+            "GET",
+            &self.key(path),
+            &[],
+            &[],
+            &[],
+            None,
+            "Download failed",
+        )?;
         http::stream(&mut resp, out, progress)
     }
 
@@ -277,10 +289,22 @@ impl Backend for S3 {
         self.delete(from, "")
     }
 
+    fn needs_folders(&self) -> bool {
+        false
+    }
+
     fn mkdir(&mut self, path: &str) -> Result<(), String> {
         let key = format!("{}/", self.key(path));
-        self.request("PUT", &key, &[], &[], &[], None, "Could not make the folder")
-            .map(|_| ())
+        self.request(
+            "PUT",
+            &key,
+            &[],
+            &[],
+            &[],
+            None,
+            "Could not make the folder",
+        )
+        .map(|_| ())
     }
 }
 

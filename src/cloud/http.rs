@@ -22,7 +22,11 @@ pub fn agent(insecure: bool) -> ureq::Agent {
         )
         .http_status_as_error(false)
         .allow_non_standard_methods(true)
+        // A dead or unreachable server fails within seconds instead of
+        // leaving "Connecting…" up forever.
+        .timeout_resolve(Some(std::time::Duration::from_secs(10)))
         .timeout_connect(Some(std::time::Duration::from_secs(15)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
         .build()
         .into()
 }
@@ -36,6 +40,8 @@ pub fn net_err(what: &str, e: ureq::Error) -> String {
              self-signed certificate needs “Trust a self-signed certificate” in the \
              account's settings."
         )
+    } else if let Some(hint) = super::network_hint(&text) {
+        format!("{what}: {text}. {hint}")
     } else {
         format!("{what}: {text}")
     }
@@ -61,7 +67,11 @@ pub fn check(what: &str, mut resp: Response) -> Result<Response, String> {
     let body = text(&mut resp);
     let detail = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .or_else(|| xml_tag(&body, "Message"))
         .or_else(|| xml_tag(&body, "s:message"))
         .filter(|m| !m.trim().is_empty());

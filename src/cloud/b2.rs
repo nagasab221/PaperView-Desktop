@@ -78,7 +78,10 @@ impl B2 {
         let agent = http::agent(false);
         let resp = agent
             .get("https://api.backblazeb2.com/b2api/v2/b2_authorize_account")
-            .header("Authorization", http::basic(acct.user.trim(), secret.trim()))
+            .header(
+                "Authorization",
+                http::basic(acct.user.trim(), secret.trim()),
+            )
             .call()
             .map_err(|e| http::net_err("Could not reach Backblaze", e))?;
         let mut resp = http::check("Backblaze didn't accept the Key ID / Application key", resp)?;
@@ -289,8 +292,16 @@ impl Backend for B2 {
             "fileName": self.key(to),
             "metadataDirective": "COPY",
         });
-        self.api("b2_copy_file", &body, &format!("Could not copy {from} to {to}"))?;
+        self.api(
+            "b2_copy_file",
+            &body,
+            &format!("Could not copy {from} to {to}"),
+        )?;
         self.delete(from, &id)
+    }
+
+    fn needs_folders(&self) -> bool {
+        false
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), String> {

@@ -89,7 +89,7 @@ Press **F11** for full screen with nothing but the pages. A small bar appears wh
 
 ### ☁ Your own cloud, if you want one
 
-Keep documents somewhere besides this computer: a **NAS**, **another computer over SSH**, or a cloud bucket. Add as many accounts as you like and switch between them on the Cloud tab, which shows each account's folders so you can browse, make new ones, and upload straight into them. Save a document with the **☁** button or by right-clicking it in Recents, and rename it on the way if you like. Nothing uploads unless you ask, and none of it appears until you add an account.
+Keep documents somewhere besides this computer: a **NAS**, **another computer over SSH**, or a cloud bucket. Add as many accounts as you like and switch between them on the Cloud tab, which shows each account's folders so you can browse, make new ones, and upload straight into them, one file at a time or a whole folder with its subfolders. Save a document with the **☁** button or by right-clicking it in Recents, and rename it on the way if you like. Nothing uploads unless you ask, and none of it appears until you add an account.
 
 | Account type | Works with |
 |---|---|
@@ -110,7 +110,8 @@ Keep documents somewhere besides this computer: a **NAS**, **another computer ov
    - **WebDAV:** the folder's full address, such as `https://nas.local:5006/PaperView` or `https://cloud.example.com/remote.php/dav/files/you/PaperView`, plus your user name and password. A NAS with a self-signed certificate needs **Trust a self-signed certificate**.
    - **S3:** the endpoint (such as `https://<account>.r2.cloudflarestorage.com`), the region (`auto` for R2), the bucket and an access key.
    - **Backblaze B2:** create a private bucket and an application key at [backblaze.com](https://www.backblaze.com/cloud-storage), then enter the Key ID, the application key and the bucket name.
-3. Click **Save and connect**. A **Cloud** tab appears in your Library. Upload with ☁, from the right-click menu, or by dropping documents onto the Cloud tab.
+3. Click **Connect and save**. PaperView connects first and shows what it's doing. The account is saved only once it answers, and you see what's there ("Connected · 12 documents and 3 folders"). If it can't connect, it tells you why (wrong password, unknown host, nothing answering on that port…) and you can fix the details or save it anyway. **Test** next to each account checks it again later.
+4. A **Cloud** tab appears in your Library. Upload with ☁, from the right-click menu, with **Upload folder…** for every PDF and ebook in a folder and its subfolders, or by dropping documents or whole folders onto the Cloud tab.
 
 </details>
 

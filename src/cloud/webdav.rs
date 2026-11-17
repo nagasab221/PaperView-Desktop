@@ -33,7 +33,9 @@ impl WebDav {
             None => (rest, ""),
         };
         if host.is_empty() {
-            return Err("The server address needs a host, e.g. https://nas.local:5006/PaperView".into());
+            return Err(
+                "The server address needs a host, e.g. https://nas.local:5006/PaperView".into(),
+            );
         }
         let user = acct.user.trim();
         Ok(WebDav {
@@ -178,8 +180,14 @@ impl Backend for WebDav {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), String> {
-        self.send("MKCOL", &self.url(path, true), &[], None, "Could not make the folder")
-            .map(|_| ())
+        self.send(
+            "MKCOL",
+            &self.url(path, true),
+            &[],
+            None,
+            "Could not make the folder",
+        )
+        .map(|_| ())
     }
 }
 
@@ -247,8 +255,7 @@ mod tests {
   <d:getlastmodified>Mon, 16 Nov 2026 10:00:00 GMT</d:getlastmodified></d:prop>
   <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
 </d:multistatus>"#;
-        let files =
-            parse_listing(body, "/remote.php/dav/files/me/Paper%20View/", "").unwrap();
+        let files = parse_listing(body, "/remote.php/dav/files/me/Paper%20View/", "").unwrap();
         assert_eq!(files.len(), 2);
         assert!(files[0].is_dir && files[0].path == "Math");
         assert_eq!(files[1].path, "König.pdf");
@@ -266,7 +273,10 @@ mod tests {
         let dav = WebDav::connect(&acct, "pw").unwrap();
         assert_eq!(dav.origin, "https://nas.local:5006");
         assert_eq!(dav.server_path("", true), "/home/Paper%20View/");
-        assert_eq!(dav.server_path("Math/a b.pdf", false), "/home/Paper%20View/Math/a%20b.pdf");
+        assert_eq!(
+            dav.server_path("Math/a b.pdf", false),
+            "/home/Paper%20View/Math/a%20b.pdf"
+        );
         let root = Account {
             address: "http://10.0.0.2:8080".into(),
             ..Default::default()
