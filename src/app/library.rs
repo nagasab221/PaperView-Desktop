@@ -1,6 +1,6 @@
-//! The Library: Recents as a shelf of first-page covers and, once a Backblaze
-//! bucket is set up and switched on, a Cloud page beside it — the same two
-//! tabs as the phone. The Cloud tab doesn't exist until the bucket does.
+//! The Library: Recents as a shelf of first-page covers and, once a cloud
+//! account is set up and switched on, a Cloud page beside it — the same two
+//! tabs as the phone. The Cloud tab doesn't exist until an account does.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +8,8 @@ use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
 use super::density::LibraryLayout;
 use super::{
-    fmt_speed, fmt_time, fmt_ts, folders, open_file_location, same_path, CloudOp, HomeScreen,
-    LandingTab, ViewerApp, FREE_TIER_BYTES,
+    fmt_speed, fmt_time, fmt_ts, folders, open_file_location, same_path, CloudFile, CloudOp,
+    HomeScreen, LandingTab, ViewerApp, FREE_TIER_BYTES,
 };
 use crate::cloud;
 use crate::covers::Cover;
@@ -82,44 +82,19 @@ fn unix(t: std::time::SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// A document already downloaded from the bucket.
+/// A document downloaded from the current cloud folder.
 pub(super) struct LocalDoc {
     pub path: PathBuf,
     pub name: String,
     pub size: u64,
 }
 
-/// Downloaded documents, read straight off the disk so they stay listed
-/// (and open) with no network at all.
-pub(super) fn read_local_docs() -> Vec<LocalDoc> {
-    let mut docs: Vec<(LocalDoc, std::time::SystemTime)> = std::fs::read_dir(cloud::cache_dir())
-        .map(|dir| {
-            dir.filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let meta = e.metadata().ok()?;
-                    if !meta.is_file() || meta.len() == 0 {
-                        return None;
-                    }
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    Some((
-                        LocalDoc {
-                            path: e.path(),
-                            name,
-                            size: meta.len(),
-                        },
-                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    docs.sort_by_key(|d| std::cmp::Reverse(d.1));
-    docs.into_iter().map(|(d, _)| d).collect()
-}
-
 impl ViewerApp {
     pub(super) fn refresh_local_docs(&mut self) {
-        self.cloud_local = read_local_docs();
+        self.cloud_local = cloud::local_docs(&self.cloud_current, &self.cloud_dir)
+            .into_iter()
+            .map(|(path, name, size)| LocalDoc { path, name, size })
+            .collect();
         self.cloud_cache = cloud::cache_stats();
     }
 
@@ -149,7 +124,7 @@ impl ViewerApp {
     }
 
     /// The Library's tabs right now: Recents always, Folders once one is
-    /// added, Cloud once a bucket is set up and switched on.
+    /// added, Cloud once an account is set up and switched on.
     fn library_tabs(&self) -> Vec<(&'static str, LandingTab)> {
         let mut tabs = vec![("Recents", LandingTab::Recent)];
         if !self.books.is_empty() {
@@ -171,7 +146,10 @@ impl ViewerApp {
             self.landing_tab = LandingTab::Recent;
         }
         let subtitle = match self.landing_tab {
-            LandingTab::Saved => self.cloud_cfg.bucket.trim().to_string(),
+            LandingTab::Saved => self
+                .current_account()
+                .map(|a| a.summary())
+                .unwrap_or_default(),
             LandingTab::Books => {
                 let n = self.books.len();
                 format!("{n} book{}", if n == 1 { "" } else { "s" })
@@ -807,30 +785,46 @@ impl ViewerApp {
 
     fn cloud_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let p = w::pal(ui);
+        let Some(acct) = self.current_account().cloned() else {
+            return;
+        };
         // Auto-list once (an error stops retries until Refresh).
         if !self.cloud_listed && !self.cloud_busy && self.cloud_status.is_none() {
-            self.start_cloud_op(ctx, CloudOp::List);
+            self.start_cloud_op(ctx, CloudOp::List(self.cloud_dir.clone()));
         }
 
         let mut refresh = false;
         let mut upload = false;
+        let mut new_folder = false;
         let busy = self.cloud_busy;
         w::section_heading(ui, "Saved to cloud", |ui| {
             if w::inline_button(ui, "Refresh", !busy).clicked() {
                 refresh = true;
             }
-            if w::inline_button(ui, "Upload a PDF…", true).clicked() {
+            if w::inline_button(ui, "New folder…", true).clicked() {
+                new_folder = true;
+            }
+            if w::inline_button(ui, "Upload…", true).clicked() {
                 upload = true;
             }
         });
+        self.cloud_path_bar(ui, &acct);
         if refresh {
             self.cloud_listed = false;
             self.cloud_status = None;
-            self.start_cloud_op(ctx, CloudOp::List);
+            self.start_cloud_op(ctx, CloudOp::List(self.cloud_dir.clone()));
+        }
+        if new_folder {
+            self.cloud_dialog = Some(CloudDialog::NewFolder {
+                draft: String::new(),
+                focus: true,
+            });
         }
         if upload {
+            let mut exts = vec!["pdf"];
+            exts.extend_from_slice(crate::ebook::EXTENSIONS);
             if let Some(paths) = rfd::FileDialog::new()
-                .add_filter("PDF documents", &["pdf"])
+                .add_filter("Documents", &exts)
                 .pick_files()
             {
                 let n = paths.len();
@@ -839,7 +833,8 @@ impl ViewerApp {
                     self.ask_upload(ctx, paths[0].clone());
                 } else {
                     for path in paths {
-                        self.start_cloud_op(ctx, CloudOp::upload(path));
+                        let op = self.upload_here(path);
+                        self.start_cloud_op(ctx, op);
                     }
                     self.toast(format!(
                         "Uploading {n} document{}",
@@ -891,69 +886,97 @@ impl ViewerApp {
             self.selection_bar(ui, ctx);
         }
 
-        // Split by where each file actually is.
+        // Folders, then documents split by where they actually are.
+        let dirs: Vec<CloudFile> = self.cloud_files.iter().filter(|f| f.is_dir).cloned().collect();
         let downloaded: Vec<CloudEntry> = self
             .cloud_local
             .iter()
             .map(|doc| CloudEntry {
                 name: doc.name.clone(),
-                bucket: self
+                remote: self
                     .cloud_files
                     .iter()
-                    .find(|f| local_name(&f.name) == doc.name)
-                    .map(|f| (f.name.clone(), f.file_id.clone(), f.size, f.uploaded_ms)),
+                    .find(|f| !f.is_dir && cloud::local_name(&f.name) == doc.name)
+                    .cloned(),
                 local: Some((doc.path.clone(), doc.size)),
             })
             .collect();
         let local_names: std::collections::HashSet<&str> =
             self.cloud_local.iter().map(|d| d.name.as_str()).collect();
-        let in_bucket: Vec<CloudEntry> = self
+        let remote_only: Vec<CloudEntry> = self
             .cloud_files
             .iter()
-            .filter(|f| !local_names.contains(local_name(&f.name).as_str()))
+            .filter(|f| !f.is_dir && !local_names.contains(cloud::local_name(&f.name).as_str()))
             .map(|f| CloudEntry {
                 name: f.name.clone(),
-                bucket: Some((f.name.clone(), f.file_id.clone(), f.size, f.uploaded_ms)),
+                remote: Some(f.clone()),
                 local: None,
             })
             .collect();
 
         let mut acts: Vec<CloudAct> = Vec::new();
-        if !downloaded.is_empty() {
-            group_label(ui, "On this device", downloaded.len());
-            for e in &downloaded {
-                self.cloud_row(ui, e, selecting, &mut acts);
+        if !dirs.is_empty() {
+            group_label(ui, "Folders", dirs.len());
+            for d in &dirs {
+                let resp = w::row(ui, true, Some("🗀"), &d.name, None, |_| {});
+                if resp.clicked() && !selecting {
+                    acts.push(CloudAct::Enter(d.path.clone()));
+                }
+                w::hairline(ui);
             }
         }
-        if !in_bucket.is_empty() {
-            group_label(ui, "In your bucket", in_bucket.len());
-            for e in &in_bucket {
-                self.cloud_row(ui, e, selecting, &mut acts);
+        if !downloaded.is_empty() {
+            let label = if acct.kind == cloud::Kind::Folder {
+                "Copies kept offline"
+            } else {
+                "On this computer"
+            };
+            group_label(ui, label, downloaded.len());
+            for e in &downloaded {
+                self.cloud_row(ui, &acct, e, selecting, &mut acts);
+            }
+        }
+        if !remote_only.is_empty() {
+            group_label(ui, &format!("In {}", acct.name), remote_only.len());
+            for e in &remote_only {
+                self.cloud_row(ui, &acct, e, selecting, &mut acts);
             }
         }
         for act in acts {
-            self.cloud_act(ctx, act);
+            self.cloud_act(ctx, &acct, act);
         }
 
         if self.cloud_listed && self.cloud_files.is_empty() && self.cloud_local.is_empty() && !busy
         {
-            w::empty_state(
-                ui,
-                "Your bucket is empty",
-                "Open a document and choose ☰ > Save to cloud, drop PDFs onto this page, or upload above.",
-                None,
-            );
+            if self.cloud_dir.is_empty() {
+                w::empty_state(
+                    ui,
+                    &format!("Nothing in {} yet", acct.name),
+                    "Open a document and choose ☰ > Save to cloud, drop documents onto this page, or upload above.",
+                    None,
+                );
+            } else {
+                w::empty_state(
+                    ui,
+                    "This folder is empty",
+                    "Drop documents onto this page or upload above to put them here.",
+                    None,
+                );
+            }
         }
 
         if let Some(msg) = self.cloud_status.clone().filter(|_| !busy) {
             ui.add_space(12.0);
             if self.cloud_files.is_empty() && !self.cloud_listed {
                 // Nothing listed at all: this is the reason, so say it plainly.
-                let auth = msg.to_ascii_lowercase().contains("authoriz");
+                let lower = msg.to_ascii_lowercase();
+                let auth = ["authoriz", "accept", "refused", "401", "403", "password"]
+                    .iter()
+                    .any(|k| lower.contains(k));
                 let headline = if auth {
-                    "Backblaze didn't accept these details"
+                    format!("{} didn't let PaperView in", acct.name)
                 } else {
-                    "Couldn't reach your bucket"
+                    format!("Couldn't reach {}", acct.name)
                 };
                 ui.label(
                     RichText::new(headline)
@@ -968,12 +991,12 @@ impl ViewerApp {
                 ui.add_space(6.0);
                 let mut settings = false;
                 ui.horizontal(|ui| {
-                    if w::inline_button(ui, "Check the details in Settings", true).clicked() {
+                    if w::inline_button(ui, "Check the account in Settings", true).clicked() {
                         settings = true;
                     }
                     if w::inline_button(ui, "Try again", true).clicked() {
                         self.cloud_status = None;
-                        self.start_cloud_op(ctx, CloudOp::List);
+                        self.start_cloud_op(ctx, CloudOp::List(self.cloud_dir.clone()));
                     }
                 });
                 if settings {
@@ -984,16 +1007,19 @@ impl ViewerApp {
             }
         }
 
-        if !self.cloud_files.is_empty() {
+        let files: Vec<&CloudFile> = self.cloud_files.iter().filter(|f| !f.is_dir).collect();
+        if !files.is_empty() {
             ui.add_space(16.0);
-            let used: u64 = self.cloud_files.iter().map(|f| f.size).sum();
+            let used: u64 = files.iter().map(|f| f.size).sum();
             let mut line = format!(
-                "{} file{} · {} of {} free tier",
-                self.cloud_files.len(),
-                if self.cloud_files.len() == 1 { "" } else { "s" },
+                "{} file{} · {}",
+                files.len(),
+                if files.len() == 1 { "" } else { "s" },
                 cloud::fmt_size(used),
-                cloud::fmt_size(FREE_TIER_BYTES),
             );
+            if acct.kind == cloud::Kind::B2 && self.cloud_dir.is_empty() {
+                line.push_str(&format!(" of {} free tier", cloud::fmt_size(FREE_TIER_BYTES)));
+            }
             if let Some(ts) = self.cloud_refreshed {
                 line.push_str(&format!(" · refreshed {}", fmt_time(ts)));
             }
@@ -1002,28 +1028,96 @@ impl ViewerApp {
             }
             ui.label(RichText::new(line).small().color(p.muted));
             ui.label(
-                RichText::new("Tip: drop PDFs anywhere on this page to upload them.")
+                RichText::new("Tip: drop documents anywhere on this page to upload them here.")
                     .small()
                     .color(p.muted),
             );
         }
     }
 
-    /// One file. Click: open it (downloading first if needed) — or, while
-    /// selecting, tick it. The "…" menu holds everything else.
+    /// Where on the account we are — "NAS › Math › Calculus", each step
+    /// clickable — and, with more than one account, a switch between them.
+    fn cloud_path_bar(&mut self, ui: &mut egui::Ui, acct: &cloud::Account) {
+        let p = w::pal(ui);
+        let mut go: Option<String> = None;
+        let mut switch: Option<String> = None;
+        let others: Vec<(String, String)> = self
+            .cloud_accounts
+            .iter()
+            .filter(|a| a.ready())
+            .map(|a| (a.id.clone(), format!("{}  {}", a.kind.glyph(), a.name)))
+            .collect();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label(RichText::new(acct.kind.glyph()).color(p.muted));
+            ui.add_space(4.0);
+            let parts: Vec<&str> = self.cloud_dir.split('/').filter(|s| !s.is_empty()).collect();
+            let crumb = |ui: &mut egui::Ui, text: &str, last: bool| -> bool {
+                if last {
+                    ui.label(RichText::new(text).family(theme::medium()).color(p.ink));
+                    false
+                } else {
+                    w::inline_button(ui, text, true).clicked()
+                }
+            };
+            if crumb(ui, &acct.name, parts.is_empty()) {
+                go = Some(String::new());
+            }
+            for (i, part) in parts.iter().enumerate() {
+                ui.label(RichText::new("›").color(p.muted));
+                if crumb(ui, part, i + 1 == parts.len()) {
+                    go = Some(parts[..=i].join("/"));
+                }
+            }
+            if others.len() > 1 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("cloud-account")
+                        .selected_text(RichText::new("Switch account").small())
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for (id, label) in &others {
+                                if ui.selectable_label(*id == acct.id, label).clicked() {
+                                    switch = Some(id.clone());
+                                }
+                            }
+                        });
+                });
+            }
+        });
+        ui.add_space(2.0);
+        if let Some(id) = switch.filter(|id| *id != acct.id) {
+            self.switch_account(id);
+        } else if let Some(dir) = go {
+            self.enter_cloud_dir(dir);
+        }
+    }
+
+    /// One document. Click: open it (downloading first if needed, straight
+    /// from the folder for Folder accounts) — or, while selecting, tick it.
+    /// The "…" menu holds everything else.
     fn cloud_row(
         &self,
         ui: &mut egui::Ui,
+        acct: &cloud::Account,
         e: &CloudEntry,
         selecting: bool,
         acts: &mut Vec<CloudAct>,
     ) {
         let p = w::pal(ui);
+        let in_place = acct.local_root();
         let picked = e
-            .bucket
+            .remote
             .as_ref()
-            .is_some_and(|b| self.cloud_selected.contains(&b.0));
-        let (glyph, sub) = match (&e.local, &e.bucket) {
+            .is_some_and(|f| self.cloud_selected.contains(&f.path));
+        let when = |f: &CloudFile| {
+            if f.modified_ms > 0 {
+                format!(" · {}", fmt_ts(f.modified_ms / 1000))
+            } else {
+                String::new()
+            }
+        };
+        let (glyph, sub) = match (&e.local, &e.remote) {
             (Some((_, size)), Some(_)) => (
                 "✔",
                 format!("On this computer · {}", cloud::fmt_size(*size)),
@@ -1032,118 +1126,146 @@ impl ViewerApp {
                 "✔",
                 format!("On this computer only · {}", cloud::fmt_size(*size)),
             ),
-            (None, Some((_, _, size, uploaded))) => (
+            (None, Some(f)) if in_place.is_some() => (
+                "🗋",
+                format!("Opens from {} · {}{}", acct.name, cloud::fmt_size(f.size), when(f)),
+            ),
+            (None, Some(f)) => (
                 "☁",
                 if selecting {
-                    format!(
-                        "In your bucket · {} · {}",
-                        cloud::fmt_size(*size),
-                        fmt_ts(uploaded / 1000)
-                    )
+                    format!("In {} · {}{}", acct.name, cloud::fmt_size(f.size), when(f))
                 } else {
-                    format!(
-                        "Click to download · {} · {}",
-                        cloud::fmt_size(*size),
-                        fmt_ts(uploaded / 1000)
-                    )
+                    format!("Click to download · {}{}", cloud::fmt_size(f.size), when(f))
                 },
             ),
             (None, None) => ("☁", String::new()),
         };
+        let in_place_path = |f: &CloudFile| {
+            in_place
+                .as_ref()
+                .map(|root| root.join(f.path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+        };
         let resp = w::row(ui, true, Some(glyph), &e.name, Some(&sub), |ui| {
             if selecting {
-                if let Some(b) = &e.bucket {
+                if let Some(f) = &e.remote {
                     if w::check(ui, picked).clicked() {
-                        acts.push(CloudAct::Toggle(b.0.clone()));
+                        acts.push(CloudAct::Toggle(f.path.clone()));
                     }
                 }
                 return;
             }
             ui.menu_button(RichText::new("…").size(16.0).color(p.muted), |ui| {
-                ui.set_min_width(190.0);
+                ui.set_min_width(200.0);
                 if let Some((path, _)) = &e.local {
                     if ui.button("Open").clicked() {
                         acts.push(CloudAct::Open(path.clone()));
                         ui.close();
                     }
-                } else if let Some((name, _, size, _)) = &e.bucket {
-                    if ui.button("Download").clicked() {
-                        acts.push(CloudAct::Download(name.clone(), *size, false));
-                        ui.close();
-                    }
-                    if ui.button("Download and open").clicked() {
-                        acts.push(CloudAct::Download(name.clone(), *size, true));
-                        ui.close();
+                } else if let Some(f) = &e.remote {
+                    if let Some(path) = in_place_path(f) {
+                        if ui.button("Open").clicked() {
+                            acts.push(CloudAct::Open(path.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Show in folder").clicked() {
+                            acts.push(CloudAct::ShowInFolder(path));
+                            ui.close();
+                        }
+                        if ui
+                            .button("Keep a copy offline")
+                            .on_hover_text("Copies it to this computer, for when the share isn't there")
+                            .clicked()
+                        {
+                            acts.push(CloudAct::Download(f.path.clone(), f.size, false));
+                            ui.close();
+                        }
+                    } else {
+                        if ui.button("Download").clicked() {
+                            acts.push(CloudAct::Download(f.path.clone(), f.size, false));
+                            ui.close();
+                        }
+                        if ui.button("Download and open").clicked() {
+                            acts.push(CloudAct::Download(f.path.clone(), f.size, true));
+                            ui.close();
+                        }
                     }
                 }
-                if let Some((name, id, _, _)) = &e.bucket {
+                if let Some(f) = &e.remote {
                     if ui.button("Rename…").clicked() {
-                        acts.push(CloudAct::Rename(name.clone(), id.clone()));
+                        acts.push(CloudAct::Rename(f.path.clone(), f.id.clone()));
                         ui.close();
                     }
                 }
                 if let Some((path, _)) = &e.local {
+                    let label = if in_place.is_some() {
+                        "Remove offline copy"
+                    } else {
+                        "Remove download"
+                    };
                     if ui
-                        .button("Remove download")
-                        .on_hover_text("Keeps it in your bucket")
+                        .button(label)
+                        .on_hover_text(format!("Keeps it in {}", acct.name))
                         .clicked()
                     {
                         acts.push(CloudAct::RemoveLocal(path.clone()));
                         ui.close();
                     }
                 }
-                if let Some((name, id, _, _)) = &e.bucket {
-                    if ui.button("Delete from cloud…").clicked() {
-                        acts.push(CloudAct::Delete(vec![(name.clone(), id.clone())]));
+                if let Some(f) = &e.remote {
+                    if ui.button(format!("Delete from {}…", acct.name)).clicked() {
+                        acts.push(CloudAct::Delete(vec![(f.path.clone(), f.id.clone())]));
                         ui.close();
                     }
                     ui.separator();
                     if ui.button("Select").clicked() {
-                        acts.push(CloudAct::Toggle(name.clone()));
+                        acts.push(CloudAct::Toggle(f.path.clone()));
                         ui.close();
                     }
                 }
             });
         });
         if resp.clicked() {
-            match (selecting, &e.local, &e.bucket) {
-                (true, _, Some(b)) => acts.push(CloudAct::Toggle(b.0.clone())),
+            match (selecting, &e.local, &e.remote) {
+                (true, _, Some(f)) => acts.push(CloudAct::Toggle(f.path.clone())),
                 (true, _, None) => {}
                 (false, Some((path, _)), _) => acts.push(CloudAct::Open(path.clone())),
-                (false, None, Some((name, _, size, _))) => {
-                    acts.push(CloudAct::Download(name.clone(), *size, true))
-                }
+                (false, None, Some(f)) => match in_place_path(f) {
+                    Some(path) => acts.push(CloudAct::Open(path)),
+                    None => acts.push(CloudAct::Download(f.path.clone(), f.size, true)),
+                },
                 (false, None, None) => {}
             }
         }
         w::hairline(ui);
     }
 
-    fn cloud_act(&mut self, ctx: &egui::Context, act: CloudAct) {
+    fn cloud_act(&mut self, ctx: &egui::Context, acct: &cloud::Account, act: CloudAct) {
         match act {
             CloudAct::Open(path) => self.open_path(ctx, &path),
-            CloudAct::Download(name, size, open) => {
-                self.toast(format!("Downloading {name}"));
-                self.start_cloud_op(ctx, CloudOp::Download(name, size, open));
+            CloudAct::ShowInFolder(path) => open_file_location(&path),
+            CloudAct::Enter(dir) => self.enter_cloud_dir(dir),
+            CloudAct::Download(path, size, open) => {
+                self.toast(format!("Downloading {}", cloud::last_part(&path)));
+                self.start_cloud_op(ctx, CloudOp::Download { path, size, open });
             }
             CloudAct::RemoveLocal(path) => {
                 let _ = std::fs::remove_file(&path);
                 self.refresh_local_docs();
-                self.toast("Removed from this computer; it's still in your bucket");
+                self.toast(format!("Removed from this computer; it's still in {}", acct.name));
             }
-            CloudAct::Rename(name, id) => {
-                let draft = name.clone();
+            CloudAct::Rename(path, id) => {
+                let draft = cloud::last_part(&path).to_string();
                 self.cloud_dialog = Some(CloudDialog::Rename {
-                    name,
+                    path,
                     id,
                     draft,
                     focus: true,
                 });
             }
             CloudAct::Delete(items) => self.cloud_dialog = Some(CloudDialog::Delete { items }),
-            CloudAct::Toggle(name) => {
-                if !self.cloud_selected.remove(&name) {
-                    self.cloud_selected.insert(name);
+            CloudAct::Toggle(path) => {
+                if !self.cloud_selected.remove(&path) {
+                    self.cloud_selected.insert(path);
                 }
             }
         }
@@ -1153,7 +1275,7 @@ impl ViewerApp {
     fn selection_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let p = w::pal(ui);
         let n = self.cloud_selected.len();
-        let all = self.cloud_files.len();
+        let all = self.cloud_files.iter().filter(|f| !f.is_dir).count();
         ui.add_space(10.0);
         let mut select_all = false;
         let mut download = false;
@@ -1187,22 +1309,35 @@ impl ViewerApp {
                 });
             });
         if select_all {
-            self.cloud_selected = self.cloud_files.iter().map(|f| f.name.clone()).collect();
+            self.cloud_selected = self
+                .cloud_files
+                .iter()
+                .filter(|f| !f.is_dir)
+                .map(|f| f.path.clone())
+                .collect();
         }
         if cancel {
             self.cloud_selected.clear();
         }
         if download {
+            let acct = self.cloud_current.clone();
             let items: Vec<(String, u64)> = self
                 .cloud_files
                 .iter()
-                .filter(|f| self.cloud_selected.contains(&f.name))
-                .filter(|f| !cloud::local_path_for(&f.name).exists())
-                .map(|f| (f.name.clone(), f.size))
+                .filter(|f| !f.is_dir && self.cloud_selected.contains(&f.path))
+                .filter(|f| !cloud::local_path_for(&acct, &f.path).exists())
+                .map(|f| (f.path.clone(), f.size))
                 .collect();
             let n = items.len();
-            for (name, size) in items {
-                self.start_cloud_op(ctx, CloudOp::Download(name, size, false));
+            for (path, size) in items {
+                self.start_cloud_op(
+                    ctx,
+                    CloudOp::Download {
+                        path,
+                        size,
+                        open: false,
+                    },
+                );
             }
             self.toast(if n == 0 {
                 "Those are all on this computer already".to_string()
@@ -1215,8 +1350,8 @@ impl ViewerApp {
             let items: Vec<(String, String)> = self
                 .cloud_files
                 .iter()
-                .filter(|f| self.cloud_selected.contains(&f.name))
-                .map(|f| (f.name.clone(), f.file_id.clone()))
+                .filter(|f| !f.is_dir && self.cloud_selected.contains(&f.path))
+                .map(|f| (f.path.clone(), f.id.clone()))
                 .collect();
             if !items.is_empty() {
                 self.cloud_dialog = Some(CloudDialog::Delete { items });
@@ -1225,18 +1360,24 @@ impl ViewerApp {
         ui.add_space(4.0);
     }
 
-    /// Rename and delete confirmations.
-    /// Whether a local PDF can be offered for upload: a bucket is set up,
-    /// and it isn't a copy that came from the bucket in the first place.
+    /// Whether a local document can be offered for upload: an account is set
+    /// up, and the file didn't come from it in the first place (a download,
+    /// or a file in a Folder account's own folder).
     pub(super) fn can_upload(&self, path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.cloud_active()
-            && path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            && cloud::is_document(&name)
             && !path.starts_with(cloud::cache_dir())
+            && !self
+                .current_account()
+                .is_some_and(|a| a.contains_local(path))
     }
 
-    /// Asks what to call a PDF in the bucket, then uploads it.
+    /// Asks what to call a document in the cloud, then uploads it into the
+    /// folder being shown.
     pub(super) fn ask_upload(&mut self, ctx: &egui::Context, path: PathBuf) {
         if !self.cloud_active() {
             return;
@@ -1250,30 +1391,41 @@ impl ViewerApp {
             draft,
             focus: true,
         });
-        // The bucket's file list, to warn before replacing a file.
+        // The folder's listing, to warn before replacing a file.
         if !self.cloud_listed && !self.cloud_busy {
-            self.start_cloud_op(ctx, CloudOp::List);
+            self.start_cloud_op(ctx, CloudOp::List(self.cloud_dir.clone()));
         }
     }
 
+    /// Rename, upload, new-folder and delete dialogs.
     pub(super) fn cloud_dialogs(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.cloud_dialog.take() else {
             return;
         };
         let p = theme::palette(self.skin, self.theme.is_dark(ctx));
+        let place = self.account_name();
+        let names_here: Vec<String> = self.cloud_files.iter().map(|f| f.name.clone()).collect();
+        let error = |ui: &mut egui::Ui, text: &str| {
+            ui.label(
+                RichText::new(text)
+                    .small()
+                    .color(ui.visuals().error_fg_color),
+            );
+        };
         match dialog {
             CloudDialog::Rename {
-                name,
+                path,
                 id,
                 mut draft,
                 focus,
             } => {
                 let mut done = false;
                 let mut go = false;
-                let wanted = with_pdf_extension(draft.trim());
-                let clash = wanted != name && self.cloud_files.iter().any(|f| f.name == wanted);
+                let old = cloud::last_part(&path).to_string();
+                let wanted = with_extension(draft.trim(), extension(&old));
+                let clash = wanted != old && names_here.contains(&wanted);
                 let valid =
-                    !draft.trim().is_empty() && !draft.contains('/') && wanted != name && !clash;
+                    !draft.trim().is_empty() && !draft.contains('/') && wanted != old && !clash;
                 let modal = w::modal("cloud-rename", ctx).show(ctx, |ui| {
                     ui.set_width(420.0);
                     ui.label(
@@ -1283,9 +1435,9 @@ impl ViewerApp {
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new(
-                            "It's renamed in your bucket, so your phone sees the new name too.",
-                        )
+                        RichText::new(format!(
+                            "It's renamed in {place}, so your other devices see the new name too."
+                        ))
                         .color(p.muted),
                     );
                     ui.add_space(12.0);
@@ -1297,17 +1449,9 @@ impl ViewerApp {
                         go = true;
                     }
                     if clash {
-                        ui.label(
-                            RichText::new("There's already a file with that name.")
-                                .small()
-                                .color(ui.visuals().error_fg_color),
-                        );
+                        error(ui, "There's already something with that name here.");
                     } else if draft.contains('/') {
-                        ui.label(
-                            RichText::new("Names can't contain “/”.")
-                                .small()
-                                .color(ui.visuals().error_fg_color),
-                        );
+                        error(ui, "Names can't contain “/”.");
                     }
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
@@ -1322,11 +1466,12 @@ impl ViewerApp {
                     });
                 });
                 if go {
+                    let to = cloud::join(cloud::parent(&path), &wanted);
                     self.toast(format!("Renaming to {wanted}…"));
-                    self.start_cloud_op(ctx, CloudOp::Rename(name, id, wanted));
+                    self.start_cloud_op(ctx, CloudOp::Rename { from: path, id, to });
                 } else if !done && !modal.should_close() {
                     self.cloud_dialog = Some(CloudDialog::Rename {
-                        name,
+                        path,
                         id,
                         draft,
                         focus: false,
@@ -1340,10 +1485,17 @@ impl ViewerApp {
             } => {
                 let mut done = false;
                 let mut go = false;
-                let wanted = with_pdf_extension(draft.trim());
-                let clash = self.cloud_files.iter().any(|f| f.name == wanted);
+                let local_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let wanted = with_extension(draft.trim(), extension(&local_name));
+                let clash = names_here.contains(&wanted);
                 let valid = !draft.trim().is_empty() && !draft.contains('/');
-                let bucket = self.cloud_cfg.bucket.trim().to_string();
+                let where_ = match self.cloud_dir.as_str() {
+                    "" => place.clone(),
+                    dir => format!("{place} › {}", dir.replace('/', " › ")),
+                };
                 let modal = w::modal("cloud-upload", ctx).show(ctx, |ui| {
                     ui.set_width(440.0);
                     ui.label(
@@ -1354,8 +1506,8 @@ impl ViewerApp {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!(
-                            "It's saved under this name in {bucket}, and your phone sees the same name. \
-                             Change it, or just upload."
+                            "It's saved in {where_} under this name, and your other devices see \
+                             the same name. Change it, or just upload."
                         ))
                         .color(p.muted),
                     );
@@ -1370,15 +1522,11 @@ impl ViewerApp {
                     }
                     ui.add_space(2.0);
                     if draft.contains('/') {
-                        ui.label(
-                            RichText::new("Names can't contain “/”.")
-                                .small()
-                                .color(ui.visuals().error_fg_color),
-                        );
+                        error(ui, "Names can't contain “/”.");
                     } else if clash {
                         ui.label(
                             RichText::new(format!(
-                                "Your bucket already has “{wanted}”. Uploading replaces it."
+                                "There's already a “{wanted}” here. Uploading replaces it."
                             ))
                             .small()
                             .color(p.accent),
@@ -1404,11 +1552,65 @@ impl ViewerApp {
                     });
                 });
                 if go {
-                    self.toast(format!("Uploading {wanted} to {bucket}…"));
-                    self.start_cloud_op(ctx, CloudOp::Upload(path, wanted));
+                    self.toast(format!("Uploading {wanted} to {place}…"));
+                    let target = cloud::join(&self.cloud_dir, &wanted);
+                    self.start_cloud_op(ctx, CloudOp::Upload(path, target));
                 } else if !done && !modal.should_close() {
                     self.cloud_dialog = Some(CloudDialog::Upload {
                         path,
+                        draft,
+                        focus: false,
+                    });
+                }
+            }
+            CloudDialog::NewFolder { mut draft, focus } => {
+                let mut done = false;
+                let mut go = false;
+                let name = draft.trim().to_string();
+                let clash = names_here.contains(&name);
+                let valid = !name.is_empty()
+                    && !name.contains('/')
+                    && !name.starts_with('.')
+                    && !clash;
+                let modal = w::modal("cloud-new-folder", ctx).show(ctx, |ui| {
+                    ui.set_width(400.0);
+                    ui.label(
+                        RichText::new("New folder")
+                            .text_style(theme::headline())
+                            .color(p.ink),
+                    );
+                    ui.add_space(12.0);
+                    let edit = w::field(ui, &mut draft, "Folder name", false, 360.0);
+                    if focus {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+                        go = true;
+                    }
+                    if clash {
+                        error(ui, "There's already something with that name here.");
+                    } else if name.contains('/') {
+                        error(ui, "Names can't contain “/”.");
+                    } else if name.starts_with('.') {
+                        error(ui, "Names starting with “.” would be hidden.");
+                    }
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if w::primary_button(ui, "Make folder", valid).clicked() {
+                                go = true;
+                            }
+                            if w::outlined_button(ui, "Cancel", true).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                });
+                if go {
+                    let path = cloud::join(&self.cloud_dir, &name);
+                    self.start_cloud_op(ctx, CloudOp::MakeFolder(path));
+                } else if !done && !modal.should_close() {
+                    self.cloud_dialog = Some(CloudDialog::NewFolder {
                         draft,
                         focus: false,
                     });
@@ -1431,18 +1633,20 @@ impl ViewerApp {
                             .color(p.ink),
                     );
                     ui.add_space(6.0);
-                    for (name, _) in items.iter().take(5) {
-                        ui.label(RichText::new(format!("·  {name}")).color(p.ink));
+                    for (path, _) in items.iter().take(5) {
+                        ui.label(
+                            RichText::new(format!("·  {}", cloud::last_part(path))).color(p.ink),
+                        );
                     }
                     if n > 5 {
                         ui.label(RichText::new(format!("…and {} more", n - 5)).color(p.muted));
                     }
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new(
-                            "They're removed from your bucket for good — your phone won't see them \
-                             either. Copies downloaded to this computer are removed too.",
-                        )
+                        RichText::new(format!(
+                            "They're removed from {place} for good — your other devices won't \
+                             see them either. Copies downloaded to this computer are removed too."
+                        ))
                         .color(p.muted),
                     );
                     ui.add_space(14.0);
@@ -1463,8 +1667,8 @@ impl ViewerApp {
                     });
                 });
                 if go {
-                    for (name, _) in &items {
-                        let _ = std::fs::remove_file(cloud::local_path_for(name));
+                    for (path, _) in &items {
+                        let _ = std::fs::remove_file(cloud::local_path_for(&self.cloud_current, path));
                     }
                     self.refresh_local_docs();
                     self.cloud_selected.clear();
@@ -1473,23 +1677,74 @@ impl ViewerApp {
                     self.cloud_dialog = Some(CloudDialog::Delete { items });
                 }
             }
+            CloudDialog::RemoveAccount { id } => {
+                let mut done = false;
+                let mut go = false;
+                let name = self
+                    .cloud_accounts
+                    .iter()
+                    .find(|a| a.id == id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                let modal = w::modal("cloud-remove-account", ctx).show(ctx, |ui| {
+                    ui.set_width(420.0);
+                    ui.label(
+                        RichText::new(format!("Remove {name}?"))
+                            .text_style(theme::headline())
+                            .color(p.ink),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "PaperView forgets this account and its saved password, and removes \
+                             what it downloaded from it. Nothing is deleted from the account itself.",
+                        )
+                        .color(p.muted),
+                    );
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let remove = w::button(
+                                ui,
+                                RichText::new("Remove").family(theme::medium()),
+                                w::Btn::new(w::Kind::Danger).min(0.0, 32.0),
+                            );
+                            if remove.clicked() {
+                                go = true;
+                            }
+                            if w::outlined_button(ui, "Cancel", true).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                });
+                if go {
+                    self.remove_account(&id);
+                } else if !done && !modal.should_close() {
+                    self.cloud_dialog = Some(CloudDialog::RemoveAccount { id });
+                }
+            }
         }
     }
 }
 
-/// A file as the Cloud page shows it: in the bucket, on this computer, or both.
+/// A document as the Cloud page shows it: in the account, on this
+/// computer, or both.
 struct CloudEntry {
     name: String,
-    /// (bucket name, file id, size, uploaded ms)
-    bucket: Option<(String, String, u64, i64)>,
+    remote: Option<CloudFile>,
     /// (downloaded copy, size)
     local: Option<(PathBuf, u64)>,
 }
 
 enum CloudAct {
     Open(PathBuf),
+    ShowInFolder(PathBuf),
+    Enter(String),
+    /// (path, size, open after)
     Download(String, u64, bool),
     RemoveLocal(PathBuf),
+    /// (path, file id)
     Rename(String, String),
     Delete(Vec<(String, String)>),
     Toggle(String),
@@ -1497,7 +1752,7 @@ enum CloudAct {
 
 pub(super) enum CloudDialog {
     Rename {
-        name: String,
+        path: String,
         id: String,
         draft: String,
         focus: bool,
@@ -1505,29 +1760,37 @@ pub(super) enum CloudDialog {
     Delete {
         items: Vec<(String, String)>,
     },
-    /// Name a local PDF before it's uploaded.
+    /// Name a local document before it's uploaded.
     Upload {
         path: PathBuf,
         draft: String,
         focus: bool,
     },
+    NewFolder {
+        draft: String,
+        focus: bool,
+    },
+    RemoveAccount {
+        id: String,
+    },
 }
 
-/// Keeps ".pdf" on a new name, adding it if the reader left it off.
-fn with_pdf_extension(name: &str) -> String {
-    if name.to_ascii_lowercase().ends_with(".pdf") {
-        name.to_string()
-    } else {
-        format!("{name}.pdf")
+/// A file name's extension, without the dot ("" when there is none).
+fn extension(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => "",
     }
 }
 
-/// The on-disk name a bucket file downloads to.
-fn local_name(bucket_name: &str) -> String {
-    cloud::local_path_for(bucket_name)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// Keeps the document's extension on a new name, adding it if the reader
+/// left it off.
+fn with_extension(name: &str, ext: &str) -> String {
+    if ext.is_empty() || name.to_ascii_lowercase().ends_with(&format!(".{}", ext.to_ascii_lowercase())) {
+        name.to_string()
+    } else {
+        format!("{name}.{ext}")
+    }
 }
 
 /// A spinner, a line of text and, when known, progress — while covers or a

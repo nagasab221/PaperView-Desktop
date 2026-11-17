@@ -274,8 +274,10 @@ impl ViewerApp {
                 }
                 Some("cloud") => {
                     eprintln!(
-                        "automate: cloud ready={} enabled={} busy={} listed={} files={} status={:?}",
-                        self.cloud_cfg.ready(),
+                        "automate: cloud accounts={} current={:?} dir={:?} enabled={} busy={} listed={} files={} status={:?}",
+                        self.cloud_accounts.len(),
+                        self.current_account().map(|a| a.name.clone()),
+                        self.cloud_dir,
                         self.cloud_enabled,
                         self.cloud_busy,
                         self.cloud_listed,

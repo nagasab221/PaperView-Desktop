@@ -9,7 +9,7 @@ use eframe::egui;
 
 use eframe::egui::scroll_area::ScrollSource;
 
-use crate::cloud::{self, B2Config, CloudEvent, CloudFile, CloudOp};
+use crate::cloud::{self, Account, CloudEvent, CloudFile, CloudOp};
 use crate::covers::Covers;
 use crate::ui::theme::{self, Palette, Skin, ThemeChoice};
 use crate::ui::widgets as w;
@@ -304,9 +304,8 @@ fn fmt_speed(bps: f64) -> String {
     format!("{}/s", cloud::fmt_size(bps.max(0.0) as u64))
 }
 
-/// Backblaze B2's free-tier allowance (10 GB), used for the "space left"
-/// stat on the Saved tab.  If you use a different bucket quota, change
-/// this constant.
+/// Backblaze B2's free-tier allowance (10 GB), shown beside a B2 account's
+/// usage on the Cloud tab.
 const FREE_TIER_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Auto-save decision: at/below the limit, not from the cloud cache, and not
@@ -483,13 +482,26 @@ pub struct ViewerApp {
     // Landing page
     recents: Vec<Recent>,
     landing_tab: LandingTab,
-    // Cloud (Backblaze B2)
-    cloud_cfg: B2Config,
+    // Cloud accounts
+    cloud_accounts: Vec<Account>,
+    /// The account the Cloud tab shows (its id).
+    cloud_current: String,
+    /// The folder of it being shown ("" is the top).
+    cloud_dir: String,
+    /// That folder's listing: subfolders and documents.
     cloud_files: Vec<CloudFile>,
     cloud_status: Option<String>,
     cloud_busy: bool,
+    /// `cloud_files` is the listing of the current account and folder.
     cloud_listed: bool,
-    cloud_rx: Option<std::sync::mpsc::Receiver<CloudEvent>>,
+    /// Every worker reports here.
+    cloud_tx: std::sync::mpsc::Sender<CloudEvent>,
+    cloud_rx: std::sync::mpsc::Receiver<CloudEvent>,
+    /// Documents in the current account's top folder (name, size), so
+    /// auto-save can skip what's already there.
+    cloud_top: Vec<(String, u64)>,
+    /// The account form open in Settings.
+    cloud_editor: Option<settings::AccountEditor>,
     /// Live transfer progress: (done, total, bytes/sec).
     cloud_progress: Option<(u64, u64, f64)>,
     /// Last measured speeds: (bytes/sec, unix ts).
@@ -499,12 +511,11 @@ pub struct ViewerApp {
     cloud_refreshed: Option<i64>,
     /// Local download-cache footprint: (files, bytes).
     cloud_cache: (usize, u64),
-    /// Queued cloud ops (one runs at a time).
-    cloud_queue: VecDeque<CloudOp>,
-    /// Names selected in the Saved tab for batch actions.
+    /// Queued cloud ops, each with the account it's for (one runs at a time).
+    cloud_queue: VecDeque<(Account, CloudOp)>,
+    /// Paths selected on the Cloud tab for batch actions.
     cloud_selected: HashSet<String>,
-    /// Two-step delete confirmation deadline.
-    /// An open rename / delete confirmation on the Cloud page.
+    /// An open rename / delete / new-folder dialog on the Cloud page.
     cloud_dialog: Option<library::CloudDialog>,
     /// View rotation for the whole document, quarter turns clockwise.
     rotation: u8,
@@ -514,12 +525,9 @@ pub struct ViewerApp {
     skin: Skin,
     applied: Option<Palette>,
     home: HomeScreen,
-    /// The user's switch for the Cloud tab (credentials are needed as well).
+    /// The user's switch for the Cloud tab (an account is needed as well).
     cloud_enabled: bool,
-    /// Credentials being edited in Settings, applied on "Save and connect".
-    b2_draft: B2Config,
-    show_app_key: bool,
-    /// Documents downloaded from the bucket, read from disk.
+    /// Downloaded documents of the folder being shown, read from disk.
     cloud_local: Vec<library::LocalDoc>,
     covers: Covers,
     peek: peek::Peek,
@@ -608,6 +616,8 @@ impl ViewerApp {
             Err(msg) => (None, Some(msg)),
         };
 
+        let (cloud_tx, cloud_rx) = std::sync::mpsc::channel();
+
         let mut app = Self {
             engine,
             engine_error,
@@ -660,12 +670,17 @@ impl ViewerApp {
             last_hit_test: None,
             recents: Vec::new(),
             landing_tab: LandingTab::Recent,
-            cloud_cfg: B2Config::default(),
+            cloud_accounts: Vec::new(),
+            cloud_current: String::new(),
+            cloud_dir: String::new(),
             cloud_files: Vec::new(),
             cloud_status: None,
             cloud_busy: false,
             cloud_listed: false,
-            cloud_rx: None,
+            cloud_tx,
+            cloud_rx,
+            cloud_top: Vec::new(),
+            cloud_editor: None,
             cloud_progress: None,
             cloud_last_dl: None,
             cloud_last_ul: None,
@@ -680,8 +695,6 @@ impl ViewerApp {
             applied: None,
             home: HomeScreen::Library,
             cloud_enabled: true,
-            b2_draft: B2Config::default(),
-            show_app_key: false,
             cloud_local: Vec::new(),
             covers: Covers::new(engine),
             peek: peek::Peek::default(),
@@ -728,6 +741,7 @@ impl ViewerApp {
 
         // Restore session preferences.
         let mut last_file = None;
+        let mut legacy_b2: Option<(String, String, String)> = None;
         if let Some(storage) = cc.storage {
             if let Some(v) = storage.get_string("mode") {
                 app.mode = if v == "single" {
@@ -801,11 +815,47 @@ impl ViewerApp {
             if let Some(r) = storage.get_string("recents") {
                 app.recents = decode_recents(&r);
             }
-            app.cloud_cfg = B2Config {
-                key_id: storage.get_string("b2_key_id").unwrap_or_default(),
-                app_key: storage.get_string("b2_app_key").unwrap_or_default(),
-                bucket: storage.get_string("b2_bucket").unwrap_or_default(),
-            };
+            match storage.get_string("cloud_accounts") {
+                Some(raw) => app.cloud_accounts = serde_json::from_str(&raw).unwrap_or_default(),
+                // Before accounts there was one Backblaze bucket.
+                None => {
+                    let key_id = storage.get_string("b2_key_id").unwrap_or_default();
+                    let app_key = storage.get_string("b2_app_key").unwrap_or_default();
+                    let bucket = storage.get_string("b2_bucket").unwrap_or_default();
+                    if !key_id.trim().is_empty() && !bucket.trim().is_empty() {
+                        legacy_b2 = Some((key_id, app_key, bucket));
+                    }
+                }
+            }
+            app.cloud_current = storage.get_string("cloud_current").unwrap_or_default();
+            app.cloud_dir = storage.get_string("cloud_dir").unwrap_or_default();
+        }
+        if let Some((key_id, app_key, bucket)) = legacy_b2 {
+            app.adopt_legacy_b2(&cc.egui_ctx, key_id, app_key, bucket);
+        }
+        // Debug builds: a folder standing in for the cloud, for UI tests.
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os("PAPERVIEW_FAKE_CLOUD").filter(|d| !d.is_empty()) {
+            if app.cloud_accounts.is_empty() {
+                let acct = Account {
+                    id: cloud::new_id(),
+                    name: "Test folder".into(),
+                    kind: cloud::Kind::Folder,
+                    address: dir.to_string_lossy().into_owned(),
+                    ..Default::default()
+                };
+                let _ = std::fs::create_dir_all(&dir);
+                app.cloud_current = acct.id.clone();
+                app.cloud_accounts.push(acct);
+            }
+        }
+        if app.current_account().is_none() {
+            app.cloud_current = app
+                .cloud_accounts
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_default();
+            app.cloud_dir.clear();
         }
         // Scripted UI tests skip the first-launch question unless testing it.
         #[cfg(debug_assertions)]
@@ -814,7 +864,6 @@ impl ViewerApp {
         {
             app.default_asked = true;
         }
-        app.b2_draft = app.cloud_cfg.clone();
         theme::install_fonts(&cc.egui_ctx);
         app.refresh_local_docs();
 
@@ -833,8 +882,11 @@ impl ViewerApp {
 
         // Know the cloud listing early: auto-save needs it to skip files
         // that are already up there.
-        if app.cloud_cfg.ready() && app.cloud_enabled {
-            app.start_cloud_op(&cc.egui_ctx, CloudOp::List);
+        if app.cloud_active() {
+            app.start_cloud_op(&cc.egui_ctx, CloudOp::List(String::new()));
+            if !app.cloud_dir.is_empty() {
+                app.start_cloud_op(&cc.egui_ctx, CloudOp::List(app.cloud_dir.clone()));
+            }
         }
 
         if let Some(path) = initial_file {
@@ -966,18 +1018,18 @@ impl ViewerApp {
             return;
         }
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(u64::MAX);
-        let from_cache = path.starts_with(cloud::cache_dir());
+        let from_cache = !self.can_upload(path);
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let already = self
-            .cloud_files
-            .iter()
-            .any(|f| f.name == name && f.size == size);
+        let already = self.cloud_top.iter().any(|(n, s)| *n == name && *s == size);
         if should_auto_save(self.auto_save_mb, size, from_cache, already) {
-            self.toast(format!("Saving {name} to your bucket…"));
-            self.start_cloud_op(ctx, CloudOp::upload(path.to_path_buf()));
+            let target = self.account_name();
+            self.toast(format!("Saving {name} to {target}…"));
+            // Auto-saves always go to the account's top folder.
+            self.cloud_top.push((name.clone(), size));
+            self.start_cloud_op(ctx, CloudOp::Upload(path.to_path_buf(), name));
         }
     }
 
@@ -1432,16 +1484,108 @@ impl ViewerApp {
         }
     }
 
+    /// The account the Cloud tab shows.
+    pub(super) fn current_account(&self) -> Option<&Account> {
+        self.cloud_accounts
+            .iter()
+            .find(|a| a.id == self.cloud_current)
+    }
+
+    /// The current account's name, for messages.
+    pub(super) fn account_name(&self) -> String {
+        self.current_account()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "the cloud".into())
+    }
+
+    /// Runs `op` against the current account — now, or after what's running.
     fn start_cloud_op(&mut self, ctx: &egui::Context, op: CloudOp) {
+        let Some(acct) = self.current_account().cloned() else {
+            return;
+        };
         if self.cloud_busy {
-            self.cloud_queue.push_back(op);
+            self.cloud_queue.push_back((acct, op));
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud_rx = Some(rx);
+        self.run_cloud_op(ctx, acct, op);
+    }
+
+    fn run_cloud_op(&mut self, ctx: &egui::Context, acct: Account, op: CloudOp) {
         self.cloud_busy = true;
         self.cloud_status = None;
-        cloud::spawn(self.cloud_cfg.clone(), op, tx, ctx.clone());
+        cloud::spawn(acct, op, self.cloud_tx.clone(), ctx.clone());
+    }
+
+    /// An upload of a local file into the folder being shown.
+    pub(super) fn upload_here(&self, path: PathBuf) -> CloudOp {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        CloudOp::Upload(path, cloud::join(&self.cloud_dir, &name))
+    }
+
+    /// Shows another account (or the same one from its top folder).
+    pub(super) fn switch_account(&mut self, id: String) {
+        self.cloud_current = id;
+        self.cloud_top.clear();
+        self.enter_cloud_dir(String::new());
+    }
+
+    /// Shows a folder of the current account.
+    pub(super) fn enter_cloud_dir(&mut self, dir: String) {
+        self.cloud_dir = dir;
+        self.cloud_files.clear();
+        self.cloud_listed = false;
+        self.cloud_status = None;
+        self.cloud_selected.clear();
+        self.cloud_progress = None;
+        self.refresh_local_docs();
+    }
+
+    /// Saves an account's secret in the system keyring, off the UI thread;
+    /// if there's no keyring, the app hears back and keeps it itself.
+    pub(super) fn persist_secret(&self, ctx: &egui::Context, account: String, secret: String) {
+        cloud::secrets::remember(&account, &secret);
+        let tx = self.cloud_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            if let Err(why) = cloud::secrets::store(&account, &secret) {
+                let _ = tx.send(CloudEvent::SecretNotStored {
+                    account,
+                    secret,
+                    why,
+                });
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// The single Backblaze bucket of earlier versions becomes an account;
+    /// its downloads (and Recents pointing at them) move into its folder.
+    fn adopt_legacy_b2(&mut self, ctx: &egui::Context, key_id: String, app_key: String, bucket: String) {
+        // A fixed id: if the app quits before settings are saved, a second
+        // migration finds the same keyring entry and download folder.
+        let acct = Account {
+            id: "b2-legacy".into(),
+            name: "Backblaze B2".into(),
+            kind: cloud::Kind::B2,
+            user: key_id.trim().to_string(),
+            bucket: bucket.trim().to_string(),
+            ..Default::default()
+        };
+        self.persist_secret(ctx, acct.id.clone(), app_key.trim().to_string());
+        for (old, new) in cloud::adopt_loose_downloads(&acct.id) {
+            for r in self.recents.iter_mut().filter(|r| same_path(&r.path, &old)) {
+                r.path = new.clone();
+            }
+            if let Some(spot) = self.peek.spots.remove(&old) {
+                self.peek.spots.insert(new, spot);
+            }
+        }
+        self.cloud_current = acct.id.clone();
+        self.cloud_dir.clear();
+        self.cloud_accounts.push(acct);
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -2015,18 +2159,20 @@ impl ViewerApp {
                 && self.landing_tab == LandingTab::Saved
                 && self.cloud_active();
             if upload_mode {
-                let pdfs: Vec<PathBuf> = dropped
+                let docs: Vec<PathBuf> = dropped
                     .iter()
-                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+                    .filter(|p| self.can_upload(p))
                     .cloned()
                     .collect();
                 let mut queued = 0usize;
-                if let [one] = pdfs.as_slice() {
+                let nothing_to_upload = docs.is_empty();
+                if let [one] = docs.as_slice() {
                     // One file: let it be named first.
                     self.ask_upload(ctx, one.clone());
                 } else {
-                    for path in pdfs {
-                        self.start_cloud_op(ctx, CloudOp::upload(path));
+                    for path in docs {
+                        let op = self.upload_here(path);
+                        self.start_cloud_op(ctx, op);
                         queued += 1;
                     }
                 }
@@ -2035,8 +2181,12 @@ impl ViewerApp {
                         "Queued {queued} upload{}",
                         if queued == 1 { "" } else { "s" }
                     ));
-                } else if let Some(path) = dropped.first() {
-                    self.open_path(ctx, path);
+                } else if nothing_to_upload {
+                    // Nothing to upload (already from the cloud, or not a
+                    // document): open it instead.
+                    if let Some(path) = dropped.first() {
+                        self.open_path(ctx, path);
+                    }
                 }
             } else if let Some(path) = dropped.first() {
                 self.open_path(ctx, path);
@@ -3105,82 +3255,104 @@ impl eframe::App for ViewerApp {
         let mut open_after: Option<PathBuf> = None;
         let mut relist = false;
         let mut refresh_local = false;
-        if let Some(rx) = &self.cloud_rx {
-            while let Ok(event) = rx.try_recv() {
-                match event {
-                    CloudEvent::Status(s) => self.cloud_status = Some(s),
-                    CloudEvent::Error(e) => {
-                        self.cloud_status = Some(e);
-                        self.cloud_busy = false;
-                        self.cloud_progress = None;
+        while let Ok(event) = self.cloud_rx.try_recv() {
+            if event.is_terminal() {
+                self.cloud_busy = false;
+                self.cloud_progress = None;
+            }
+            match event {
+                CloudEvent::Status(s) => self.cloud_status = Some(s),
+                CloudEvent::Error(e) => self.cloud_status = Some(e),
+                CloudEvent::Listed {
+                    account,
+                    dir,
+                    files,
+                } => {
+                    if account != self.cloud_current {
+                        continue;
                     }
-                    CloudEvent::Files(files) => {
+                    if dir.is_empty() {
+                        self.cloud_top = files
+                            .iter()
+                            .filter(|f| !f.is_dir)
+                            .map(|f| (f.name.clone(), f.size))
+                            .collect();
+                    }
+                    if dir == self.cloud_dir {
                         self.cloud_files = files;
                         self.cloud_listed = true;
-                        self.cloud_busy = false;
                         self.cloud_status = None;
                         self.cloud_refreshed = Some(now_ts());
                         refresh_local = true;
                     }
-                    CloudEvent::Progress { done, total, bps } => {
-                        self.cloud_progress = Some((done, total, bps));
+                }
+                CloudEvent::Progress { done, total, bps } => {
+                    self.cloud_progress = Some((done, total, bps));
+                }
+                CloudEvent::Downloaded {
+                    path,
+                    bytes,
+                    secs,
+                    open,
+                } => {
+                    self.cloud_status = None;
+                    self.cloud_last_dl = Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                    refresh_local = true;
+                    if open {
+                        open_after = Some(path);
                     }
-                    CloudEvent::Downloaded {
-                        path,
-                        bytes,
-                        secs,
-                        open,
-                    } => {
-                        self.cloud_busy = false;
-                        self.cloud_status = None;
-                        self.cloud_progress = None;
-                        self.cloud_last_dl = Some((bytes as f64 / secs.max(1e-3), now_ts()));
-                        refresh_local = true;
-                        if open {
-                            open_after = Some(path);
-                        }
+                }
+                CloudEvent::UploadDone { name, bytes, secs } => {
+                    self.cloud_status = Some(format!("Uploaded {name}"));
+                    self.cloud_last_ul = Some((bytes as f64 / secs.max(1e-3), now_ts()));
+                    // Refresh once the whole queue is done.
+                    relist = self.cloud_queue.is_empty();
+                }
+                CloudEvent::Deleted(n) => {
+                    self.cloud_status = None;
+                    let place = self.account_name();
+                    self.toast(format!(
+                        "Deleted {n} file{} from {place}",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    self.cloud_selected.clear();
+                    relist = self.cloud_queue.is_empty();
+                    refresh_local = true;
+                }
+                CloudEvent::Renamed {
+                    to,
+                    from_local,
+                    to_local,
+                } => {
+                    self.cloud_status = None;
+                    // A Recents entry for the downloaded copy follows it.
+                    for r in self
+                        .recents
+                        .iter_mut()
+                        .filter(|r| same_path(&r.path, &from_local))
+                    {
+                        r.path = to_local.clone();
                     }
-                    CloudEvent::UploadDone { name, bytes, secs } => {
-                        self.cloud_busy = false;
-                        self.cloud_status = Some(format!("Uploaded {name}"));
-                        self.cloud_progress = None;
-                        self.cloud_last_ul = Some((bytes as f64 / secs.max(1e-3), now_ts()));
-                        // Refresh once the whole queue is done.
-                        relist = self.cloud_queue.is_empty();
+                    if let Some(spot) = self.peek.spots.remove(&from_local) {
+                        self.peek.spots.insert(to_local, spot);
                     }
-                    CloudEvent::Deleted(n) => {
-                        self.cloud_busy = false;
-                        self.cloud_status = None;
-                        self.toast = Some((
-                            format!(
-                                "Deleted {n} file{} from your bucket",
-                                if n == 1 { "" } else { "s" }
-                            ),
-                            Instant::now(),
-                        ));
-                        self.cloud_selected.clear();
-                        relist = self.cloud_queue.is_empty();
-                        refresh_local = true;
-                    }
-                    CloudEvent::Renamed { from, to } => {
-                        self.cloud_busy = false;
-                        self.cloud_status = None;
-                        // A Recents entry for the downloaded copy follows it.
-                        let (old_local, new_local) =
-                            (cloud::local_path_for(&from), cloud::local_path_for(&to));
-                        for r in self
-                            .recents
-                            .iter_mut()
-                            .filter(|r| same_path(&r.path, &old_local))
-                        {
-                            r.path = new_local.clone();
-                        }
-                        if let Some(spot) = self.peek.spots.remove(&old_local) {
-                            self.peek.spots.insert(new_local, spot);
-                        }
-                        self.toast = Some((format!("Renamed to {to}"), Instant::now()));
-                        relist = self.cloud_queue.is_empty();
-                        refresh_local = true;
+                    self.toast(format!("Renamed to {}", cloud::last_part(&to)));
+                    relist = self.cloud_queue.is_empty();
+                    refresh_local = true;
+                }
+                CloudEvent::FolderMade(path) => {
+                    self.cloud_status = None;
+                    self.toast(format!("Made the folder {}", cloud::last_part(&path)));
+                    relist = self.cloud_queue.is_empty();
+                }
+                CloudEvent::SecretNotStored {
+                    account,
+                    secret,
+                    why,
+                } => {
+                    if let Some(a) = self.cloud_accounts.iter_mut().find(|a| a.id == account) {
+                        a.plain_secret = Some(secret);
+                        eprintln!("paperview: {why}; keeping {}'s secret in the settings file", a.name);
                     }
                 }
             }
@@ -3190,11 +3362,11 @@ impl eframe::App for ViewerApp {
         }
         // Run the next queued op, or refresh the listing after a batch.
         if !self.cloud_busy {
-            if let Some(op) = self.cloud_queue.pop_front() {
-                self.start_cloud_op(&ctx, op);
+            if let Some((acct, op)) = self.cloud_queue.pop_front() {
+                self.run_cloud_op(&ctx, acct, op);
             } else if relist {
                 self.cloud_listed = false;
-                self.start_cloud_op(&ctx, CloudOp::List);
+                self.start_cloud_op(&ctx, CloudOp::List(self.cloud_dir.clone()));
             }
         }
         if let Some(path) = open_after {
@@ -3298,9 +3470,17 @@ impl eframe::App for ViewerApp {
         storage.set_string("library_layout", self.library_layout.key().to_string());
         storage.set_string("zoom", zoom_to_str(self.zoom));
         storage.set_string("recents", encode_recents(&self.recents));
-        storage.set_string("b2_key_id", self.cloud_cfg.key_id.clone());
-        storage.set_string("b2_app_key", self.cloud_cfg.app_key.clone());
-        storage.set_string("b2_bucket", self.cloud_cfg.bucket.clone());
+        storage.set_string(
+            "cloud_accounts",
+            serde_json::to_string(&self.cloud_accounts).unwrap_or_default(),
+        );
+        storage.set_string("cloud_current", self.cloud_current.clone());
+        storage.set_string("cloud_dir", self.cloud_dir.clone());
+        // The pre-accounts bucket details now live in the account (and the
+        // key in the keyring).
+        for old in ["b2_key_id", "b2_app_key", "b2_bucket"] {
+            storage.set_string(old, String::new());
+        }
         storage.set_string(
             "auto_save",
             if self.auto_save { "1" } else { "0" }.to_string(),

@@ -1,6 +1,6 @@
 [package]
 name = "paperview"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "PaperView: a lightweight, fast-starting PDF reader for Linux and Windows"
 
@@ -27,6 +27,14 @@ png = "0.18"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
+# Cloud accounts: S3 request signing (SigV4), WebDAV/S3 XML listings (same
+# quick-xml version wayland-scanner already builds), and passwords kept in
+# the system keyring (Secret Service over pure-Rust D-Bus on Linux, the
+# Credential Manager on Windows).
+hmac = "0.12"
+sha2 = "0.10"
+quick-xml = "0.39"
+keyring = "4.2"
 # Win32 window handle for parenting the print dialog (matches eframe/winit).
 raw-window-handle = "0.6"
 # default features pull in the `image` crate (incl. AVIF codecs) which we don't
@@ -38,7 +46,7 @@ pdfium-render = { version = "0.9", default-features = false, features = [
     "pdfium_latest",
 ] }
 
-# Backblaze B2 "Cloud" tab: blocking HTTP on worker threads — no async runtime.
+# Cloud accounts (B2, S3, WebDAV): blocking HTTP on worker threads — no async runtime.
 # Windows uses Schannel (native-tls): rustls's `ring` needs a C compiler the
 # Windows build machine doesn't have. Linux uses rustls with Mozilla's roots
 # built in, so the binary doesn't depend on the system's OpenSSL version

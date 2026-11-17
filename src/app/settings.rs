@@ -1,9 +1,9 @@
-//! Settings: appearance, the Backblaze bucket, storage and system integration.
+//! Settings: appearance, reading, cloud accounts, storage and system integration.
 
 use eframe::egui::{self, RichText, Stroke};
 
 use super::{CloudOp, HomeScreen, ViewerApp};
-use crate::cloud;
+use crate::cloud::{self, Account, Kind};
 use crate::ui::theme::{self, Skin, ThemeChoice};
 use crate::ui::widgets as w;
 
@@ -56,149 +56,14 @@ impl ViewerApp {
         w::section_heading(ui, "Reading", |_| {});
         self.reading_settings(ui);
 
-        // ── Backblaze B2 ─────────────────────────────────────────────────────
-        w::section_heading(ui, "Backblaze B2", |_| {});
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(
-                "Keep documents in your own private bucket — Backblaze gives you 10 GB free. \
-                 It's the same bucket your phone uses. Nothing uploads unless you choose \
-                 Save to cloud.",
-            )
-            .color(p.muted),
-        );
-        ui.hyperlink_to(
-            RichText::new("Create a free Backblaze account").color(p.accent),
-            "https://www.backblaze.com/sign-up/cloud-storage",
-        );
-        ui.add_space(6.0);
-
-        let ready = self.cloud_cfg.ready();
-        let sub = if !ready {
-            "Save your bucket details below to turn this on"
-        } else if self.cloud_enabled {
-            "On — the Library shows Recents and Cloud"
-        } else {
-            "Off — the Library shows Recents only"
-        };
-        let mut on = self.cloud_enabled && ready;
-        w::row(ui, false, Some("☁"), "Cloud tab", Some(sub), |ui| {
-            ui.add_space(4.0);
-            if w::switch(ui, &mut on, ready).changed() {
-                self.cloud_enabled = on;
-            }
-        });
-        w::hairline(ui);
-        ui.add_space(14.0);
-
-        w::field_label(ui, "Key ID");
-        w::field(
-            ui,
-            &mut self.b2_draft.key_id,
-            "e.g. 005a1b2c3d4e5f60000000001",
-            false,
-            380.0,
-        );
-        ui.add_space(8.0);
-        w::field_label(ui, "Application key");
-        ui.horizontal(|ui| {
-            w::field(
-                ui,
-                &mut self.b2_draft.app_key,
-                "Starts with K — shown once, when the key is created",
-                !self.show_app_key,
-                380.0,
-            );
-            if w::inline_button(ui, if self.show_app_key { "Hide" } else { "Show" }, true).clicked()
-            {
-                self.show_app_key = !self.show_app_key;
-            }
-        });
-        let key = self.b2_draft.app_key.trim();
-        if !key.is_empty() && !key.starts_with('K') {
-            ui.label(
-                RichText::new("Application keys start with “K” — this looks like the Key ID.")
-                    .small()
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
-        ui.add_space(8.0);
-        w::field_label(ui, "Bucket name");
-        w::field(
-            ui,
-            &mut self.b2_draft.bucket,
-            "Exactly as it appears in Backblaze",
-            false,
-            380.0,
-        );
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            let changed = self.b2_draft != self.cloud_cfg;
-            let label = if changed || !ready {
-                "Save and connect"
-            } else {
-                "Saved"
-            };
-            if w::primary_button(ui, label, self.b2_draft.ready() && (changed || !ready)).clicked()
-            {
-                self.cloud_cfg = B2Trimmed::trim(self.b2_draft.clone());
-                self.b2_draft = self.cloud_cfg.clone();
-                self.cloud_files.clear();
-                self.cloud_listed = false;
-                self.cloud_status = None;
-                self.cloud_enabled = true;
-                self.start_cloud_op(&ctx, CloudOp::List);
-                self.toast("Connecting to your bucket…");
-            }
-            if ready && w::inline_button(ui, "Forget these details", true).clicked() {
-                self.cloud_cfg = Default::default();
-                self.b2_draft = Default::default();
-                self.cloud_files.clear();
-                self.cloud_listed = false;
-                self.cloud_status = None;
-            }
-        });
-        if let Some(msg) = self.cloud_status.clone().filter(|_| !self.cloud_busy) {
-            ui.add_space(6.0);
-            ui.label(RichText::new(msg).small().color(p.muted));
-        }
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new("Stored on this computer only, in PaperView's settings file.")
-                .small()
-                .color(p.muted),
-        );
-
-        ui.add_space(10.0);
-        let active = self.cloud_active();
-        let sub = format!("Upload every PDF you open, up to {} MB", self.auto_save_mb);
-        let mut auto = self.auto_save && active;
-        w::row(
-            ui,
-            false,
-            Some("⬆"),
-            "Auto-save opened PDFs",
-            Some(&sub),
-            |ui| {
-                ui.add_space(4.0);
-                if w::switch(ui, &mut auto, active).changed() {
-                    self.auto_save = auto;
-                }
-                ui.add_enabled(
-                    active && self.auto_save,
-                    egui::DragValue::new(&mut self.auto_save_mb)
-                        .range(1..=500)
-                        .suffix(" MB"),
-                );
-            },
-        );
-        w::hairline(ui);
+        // ── Cloud accounts ───────────────────────────────────────────────────
+        self.cloud_settings(ui, &ctx);
 
         // ── Storage ──────────────────────────────────────────────────────────
         w::section_heading(ui, "Storage", |_| {});
         let (n, bytes) = self.cloud_cache;
         let sub = format!(
-            "{n} file{} · {} — downloaded from your bucket",
+            "{n} file{} · {} — downloaded from your cloud accounts",
             if n == 1 { "" } else { "s" },
             cloud::fmt_size(bytes)
         );
@@ -219,9 +84,12 @@ impl ViewerApp {
         if clear {
             if let Ok(dir) = std::fs::read_dir(cloud::cache_dir()) {
                 for entry in dir.flatten() {
-                    if entry.path().is_file() {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
+                    let path = entry.path();
+                    let _ = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
                 }
             }
             self.refresh_local_docs();
@@ -408,17 +276,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+,", "Settings"),
 ];
 
-/// Whitespace pasted around credentials is the usual reason they're rejected.
-struct B2Trimmed;
-impl B2Trimmed {
-    fn trim(mut c: cloud::B2Config) -> cloud::B2Config {
-        c.key_id = c.key_id.trim().to_string();
-        c.app_key = c.app_key.trim().to_string();
-        c.bucket = c.bucket.trim().to_string();
-        c
-    }
-}
-
 /// A small preview of a skin: its paper, a rule, a line of ink, its accent.
 fn skin_card(
     ui: &mut egui::Ui,
@@ -478,4 +335,471 @@ fn skin_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// The account form in Settings: a new account, or changes to one.
+pub(super) struct AccountEditor {
+    /// The account being changed (None: a new one).
+    editing: Option<String>,
+    draft: Account,
+    /// A new password / secret key; empty keeps the saved one.
+    secret: String,
+    show_secret: bool,
+}
+
+impl AccountEditor {
+    fn new(kind: Kind) -> Self {
+        AccountEditor {
+            editing: None,
+            draft: Account {
+                kind,
+                ..Default::default()
+            },
+            secret: String::new(),
+            show_secret: false,
+        }
+    }
+}
+
+impl ViewerApp {
+    fn cloud_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = w::pal(ui);
+        let mut add = false;
+        w::section_heading(ui, "Cloud", |ui| {
+            if self.cloud_editor.is_none() && w::inline_button(ui, "Add account", true).clicked() {
+                add = true;
+            }
+        });
+        if add {
+            self.cloud_editor = Some(AccountEditor::new(Kind::Ssh));
+        }
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(
+                "Keep documents somewhere besides this computer: a NAS, another computer over \
+                 SSH, or a cloud bucket. Nothing uploads unless you choose Save to cloud.",
+            )
+            .color(p.muted),
+        );
+        ui.add_space(6.0);
+
+        let mut use_id: Option<String> = None;
+        let mut edit_id: Option<String> = None;
+        let mut remove_id: Option<String> = None;
+        for acct in &self.cloud_accounts {
+            let current = acct.id == self.cloud_current;
+            let mut sub = acct.summary();
+            if current && self.cloud_accounts.len() > 1 {
+                sub.push_str(" · shown in the Cloud tab");
+            }
+            w::row(ui, false, Some(acct.kind.glyph()), &acct.name, Some(&sub), |ui| {
+                if w::inline_button(ui, "Remove", true).clicked() {
+                    remove_id = Some(acct.id.clone());
+                }
+                if w::inline_button(ui, "Edit", self.cloud_editor.is_none()).clicked() {
+                    edit_id = Some(acct.id.clone());
+                }
+                if !current && w::inline_button(ui, "Show", acct.ready()).clicked() {
+                    use_id = Some(acct.id.clone());
+                }
+            });
+            w::hairline(ui);
+        }
+        if self.cloud_accounts.is_empty() && self.cloud_editor.is_none() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("No accounts yet.").color(p.muted));
+                if w::inline_button(ui, "Add one", true).clicked() {
+                    self.cloud_editor = Some(AccountEditor::new(Kind::Ssh));
+                }
+            });
+        }
+        if let Some(id) = use_id {
+            self.switch_account(id);
+            self.cloud_enabled = true;
+        }
+        if let Some(id) = edit_id {
+            if let Some(acct) = self.cloud_accounts.iter().find(|a| a.id == id) {
+                self.cloud_editor = Some(AccountEditor {
+                    editing: Some(id),
+                    draft: acct.clone(),
+                    secret: String::new(),
+                    show_secret: false,
+                });
+            }
+        }
+        if let Some(id) = remove_id {
+            self.cloud_dialog = Some(super::library::CloudDialog::RemoveAccount { id });
+        }
+
+        if self.cloud_editor.is_some() {
+            self.account_form(ui, ctx);
+        }
+
+        ui.add_space(10.0);
+        let ready = self.current_account().is_some_and(|a| a.ready());
+        let sub = if !ready {
+            "Add an account above to turn this on"
+        } else if self.cloud_enabled {
+            "On — the Library shows a Cloud tab"
+        } else {
+            "Off — the Library shows no Cloud tab"
+        };
+        let mut on = self.cloud_enabled && ready;
+        w::row(ui, false, Some("☁"), "Cloud tab", Some(sub), |ui| {
+            ui.add_space(4.0);
+            if w::switch(ui, &mut on, ready).changed() {
+                self.cloud_enabled = on;
+            }
+        });
+        w::hairline(ui);
+
+        let active = self.cloud_active();
+        let sub = format!(
+            "Upload every document you open to {}, up to {} MB",
+            self.account_name(),
+            self.auto_save_mb
+        );
+        let mut auto = self.auto_save && active;
+        w::row(
+            ui,
+            false,
+            Some("⬆"),
+            "Auto-save opened documents",
+            Some(&sub),
+            |ui| {
+                ui.add_space(4.0);
+                if w::switch(ui, &mut auto, active).changed() {
+                    self.auto_save = auto;
+                }
+                ui.add_enabled(
+                    active && self.auto_save,
+                    egui::DragValue::new(&mut self.auto_save_mb)
+                        .range(1..=500)
+                        .suffix(" MB"),
+                );
+            },
+        );
+        w::hairline(ui);
+        ui.add_space(4.0);
+        let plain: Vec<&str> = self
+            .cloud_accounts
+            .iter()
+            .filter(|a| a.plain_secret.is_some())
+            .map(|a| a.name.as_str())
+            .collect();
+        let note = if plain.is_empty() {
+            "Passwords and keys are kept in your system keyring, never in PaperView's settings."
+                .to_string()
+        } else {
+            format!(
+                "No system keyring was available, so the password for {} is kept in \
+                 PaperView's settings file on this computer.",
+                plain.join(", ")
+            )
+        };
+        ui.label(RichText::new(note).small().color(p.muted));
+    }
+
+    /// The add / edit form for one account.
+    fn account_form(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = w::pal(ui);
+        let Some(mut ed) = self.cloud_editor.take() else {
+            return;
+        };
+        let mut save = false;
+        let mut cancel = false;
+        let has_saved_secret = ed.editing.as_ref().is_some_and(|id| {
+            self.cloud_accounts
+                .iter()
+                .any(|a| a.id == *id && a.kind == ed.draft.kind)
+        });
+        ui.add_space(12.0);
+        egui::Frame::NONE
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.hairline))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
+                let title = if ed.editing.is_some() {
+                    format!("Edit {}", ed.draft.name)
+                } else {
+                    "Add an account".to_string()
+                };
+                ui.label(RichText::new(title).text_style(theme::title()).color(p.ink));
+                ui.add_space(8.0);
+                if ed.editing.is_none() {
+                    let labels: Vec<&str> = Kind::ALL.iter().map(|k| k.label()).collect();
+                    let sel = Kind::ALL.iter().position(|k| *k == ed.draft.kind).unwrap_or(0);
+                    if let Some(i) = w::choice_chips(ui, &labels, sel) {
+                        ed.draft.kind = Kind::ALL[i];
+                    }
+                    ui.add_space(8.0);
+                }
+                let (blurb, link) = kind_blurb(ed.draft.kind);
+                ui.label(RichText::new(blurb).color(p.muted));
+                if let Some((text, url)) = link {
+                    ui.hyperlink_to(RichText::new(text).color(p.accent), url);
+                }
+                ui.add_space(10.0);
+
+                const W: f32 = 380.0;
+                let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
+                    w::field_label(ui, label);
+                    w::field(ui, value, hint, false, W);
+                    ui.add_space(6.0);
+                };
+                let d = &mut ed.draft;
+                field(ui, "Name", &mut d.name, name_hint(d.kind));
+                match d.kind {
+                    Kind::Folder => {
+                        w::field_label(ui, "Folder");
+                        ui.horizontal(|ui| {
+                            w::field(ui, &mut d.address, "e.g. /mnt/nas/Documents", false, W);
+                            if w::inline_button(ui, "Choose…", true).clicked() {
+                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                    d.address = dir.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                    Kind::WebDav => {
+                        field(
+                            ui,
+                            "Server address",
+                            &mut d.address,
+                            "https://nas.local:5006/PaperView",
+                        );
+                        field(ui, "User name", &mut d.user, "");
+                    }
+                    Kind::S3 => {
+                        field(
+                            ui,
+                            "Endpoint",
+                            &mut d.address,
+                            "https://<account id>.r2.cloudflarestorage.com",
+                        );
+                        field(
+                            ui,
+                            "Region",
+                            &mut d.region,
+                            "“auto” for R2, e.g. eu-central-1 — empty means us-east-1",
+                        );
+                        field(ui, "Bucket", &mut d.bucket, "");
+                        field(ui, "Access key ID", &mut d.user, "");
+                    }
+                    Kind::B2 => {
+                        field(ui, "Key ID", &mut d.user, "e.g. 005a1b2c3d4e5f60000000001");
+                        field(ui, "Bucket name", &mut d.bucket, "Exactly as it appears in Backblaze");
+                    }
+                    Kind::Ssh => {
+                        field(
+                            ui,
+                            "Host",
+                            &mut d.address,
+                            "A host name or an alias from ~/.ssh/config",
+                        );
+                        field(
+                            ui,
+                            "User (optional)",
+                            &mut d.user,
+                            "When not set in ~/.ssh/config",
+                        );
+                        field(ui, "Port (optional)", &mut d.port, "22");
+                    }
+                }
+                if d.kind.has_secret() {
+                    let label = match d.kind {
+                        Kind::S3 => "Secret access key",
+                        Kind::B2 => "Application key",
+                        _ => "Password",
+                    };
+                    let hint = if has_saved_secret {
+                        "Saved — leave empty to keep it"
+                    } else if d.kind == Kind::B2 {
+                        "Starts with K — shown once, when the key is created"
+                    } else {
+                        ""
+                    };
+                    w::field_label(ui, label);
+                    ui.horizontal(|ui| {
+                        w::field(ui, &mut ed.secret, hint, !ed.show_secret, W);
+                        if w::inline_button(ui, if ed.show_secret { "Hide" } else { "Show" }, true)
+                            .clicked()
+                        {
+                            ed.show_secret = !ed.show_secret;
+                        }
+                    });
+                    let key = ed.secret.trim();
+                    if ed.draft.kind == Kind::B2 && !key.is_empty() && !key.starts_with('K') {
+                        ui.label(
+                            RichText::new(
+                                "Application keys start with “K” — this looks like the Key ID.",
+                            )
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                        );
+                    }
+                    ui.add_space(6.0);
+                }
+                let d = &mut ed.draft;
+                match d.kind {
+                    Kind::S3 | Kind::B2 => field(
+                        ui,
+                        "Folder in the bucket (optional)",
+                        &mut d.folder,
+                        "Empty uses the whole bucket",
+                    ),
+                    Kind::Ssh => field(
+                        ui,
+                        "Folder on the server",
+                        &mut d.folder,
+                        "PaperView (in your home folder) — made if it's missing",
+                    ),
+                    _ => {}
+                }
+                if matches!(d.kind, Kind::WebDav | Kind::S3) {
+                    ui.checkbox(
+                        &mut d.insecure_tls,
+                        RichText::new("Trust a self-signed certificate (a NAS on your own network)")
+                            .color(p.ink),
+                    );
+                    ui.add_space(6.0);
+                }
+                if d.kind == Kind::Ssh {
+                    ui.label(
+                        RichText::new(
+                            "Signs in with your SSH keys and ~/.ssh/config, like ssh in a \
+                             terminal; no password is stored. A new server's key is accepted \
+                             the first time.",
+                        )
+                        .small()
+                        .color(p.muted),
+                    );
+                    ui.add_space(6.0);
+                }
+
+                let needs_secret = ed.draft.kind.has_secret()
+                    && ed.draft.kind != Kind::WebDav
+                    && !has_saved_secret
+                    && ed.secret.trim().is_empty();
+                let ok = ed.draft.ready() && !needs_secret;
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if w::primary_button(ui, "Save and connect", ok).clicked() {
+                        save = true;
+                    }
+                    if w::outlined_button(ui, "Cancel", true).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if save {
+            self.save_account(ctx, ed);
+        } else if !cancel {
+            self.cloud_editor = Some(ed);
+        }
+    }
+
+    fn save_account(&mut self, ctx: &egui::Context, ed: AccountEditor) {
+        let mut acct = ed.draft.trimmed();
+        if acct.name.is_empty() {
+            acct.name = match acct.kind {
+                Kind::Ssh | Kind::WebDav if !acct.address.is_empty() => acct
+                    .address
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split(['/', ':'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+                Kind::Folder => crate::cloud::expand_home(&acct.address)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Folder".into()),
+                k => k.label().to_string(),
+            };
+        }
+        acct.id = ed.editing.clone().unwrap_or_else(crate::cloud::new_id);
+        let secret = ed.secret.trim().to_string();
+        if !secret.is_empty() {
+            // A new secret goes to the keyring (the settings-file copy, if
+            // there was one, is dropped; it comes back if the keyring fails).
+            acct.plain_secret = None;
+            self.persist_secret(ctx, acct.id.clone(), secret);
+        }
+        let name = acct.name.clone();
+        let id = acct.id.clone();
+        match self.cloud_accounts.iter_mut().find(|a| a.id == id) {
+            Some(slot) => *slot = acct,
+            None => self.cloud_accounts.push(acct),
+        }
+        self.switch_account(id);
+        self.cloud_enabled = true;
+        self.start_cloud_op(ctx, CloudOp::List(String::new()));
+        self.toast(format!("Connecting to {name}…"));
+    }
+
+    /// Forgets an account, its saved secret and its downloads.
+    pub(super) fn remove_account(&mut self, id: &str) {
+        let Some(i) = self.cloud_accounts.iter().position(|a| a.id == id) else {
+            return;
+        };
+        let acct = self.cloud_accounts.remove(i);
+        let gone = acct.id.clone();
+        std::thread::spawn(move || cloud::secrets::forget(&gone));
+        let _ = std::fs::remove_dir_all(cloud::account_cache(&acct.id));
+        self.cloud_queue.retain(|(a, _)| a.id != acct.id);
+        if self.cloud_current == acct.id {
+            let next = self
+                .cloud_accounts
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_default();
+            self.switch_account(next);
+        }
+        self.refresh_local_docs();
+        self.toast(format!("Removed {}", acct.name));
+    }
+}
+
+fn kind_blurb(kind: Kind) -> (&'static str, Option<(&'static str, &'static str)>) {
+    match kind {
+        Kind::Folder => (
+            "A folder on this computer: a mounted NAS share (SMB, NFS), or a Syncthing or \
+             Nextcloud folder. Documents open straight from it.",
+            None,
+        ),
+        Kind::WebDav => (
+            "Nextcloud, ownCloud, Synology, QNAP, TrueNAS and most NAS boxes. Use the full \
+             address of the folder, starting with http:// or https://.",
+            None,
+        ),
+        Kind::S3 => (
+            "Cloudflare R2, Wasabi, AWS S3, MinIO, iDrive e2 — anything that speaks S3.",
+            None,
+        ),
+        Kind::B2 => (
+            "Your own private Backblaze bucket — 10 GB free. The phone app can use the same bucket.",
+            Some((
+                "Create a free Backblaze account",
+                "https://www.backblaze.com/sign-up/cloud-storage",
+            )),
+        ),
+        Kind::Ssh => (
+            "Another computer or a NAS you can reach with ssh. Documents go in a folder there.",
+            None,
+        ),
+    }
+}
+
+fn name_hint(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Folder => "e.g. NAS share",
+        Kind::WebDav => "e.g. Nextcloud",
+        Kind::S3 => "e.g. R2",
+        Kind::B2 => "Backblaze B2",
+        Kind::Ssh => "e.g. Laptop",
+    }
 }

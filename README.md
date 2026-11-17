@@ -89,17 +89,28 @@ Press **F11** for full screen with nothing but the pages. A small bar appears wh
 
 ### ☁ Your own cloud, if you want one
 
-Keep documents in your own private **Backblaze B2** bucket (10 GB free): the same bucket the phone app uses, so a PDF saved on one shows up on the other. Save a PDF with the **☁** button or by right-clicking it in Recents, and rename it on the way if you like. Nothing uploads unless you ask, and none of it appears until you connect a bucket.
+Keep documents somewhere besides this computer: a **NAS**, **another computer over SSH**, or a cloud bucket. Add as many accounts as you like and switch between them on the Cloud tab, which shows each account's folders so you can browse, make new ones, and upload straight into them. Save a document with the **☁** button or by right-clicking it in Recents, and rename it on the way if you like. Nothing uploads unless you ask, and none of it appears until you add an account.
+
+| Account type | Works with |
+|---|---|
+| **Folder** | Any folder: a mounted NAS share (SMB, NFS, sshfs), a Syncthing or Nextcloud folder. Documents open straight from it. |
+| **WebDAV** | Nextcloud, ownCloud, Synology, QNAP, TrueNAS, OpenMediaVault, Koofr… |
+| **S3** | Cloudflare R2, Wasabi, AWS S3, MinIO, iDrive e2 and anything else that speaks S3 |
+| **Backblaze B2** | Your private B2 bucket (10 GB free), the same bucket the phone app uses |
+| **SSH** | Any computer or NAS you can `ssh` into. It uses your SSH keys and `~/.ssh/config`, and no password is stored |
 
 ![Saving a PDF to the cloud under a new name](docs/screenshots/cloud.png)
 
 <details>
-<summary>Setting up the cloud</summary>
+<summary>Setting up an account</summary>
 
-1. Create a free account at [backblaze.com](https://www.backblaze.com/cloud-storage) and make a **private bucket**. Already use the cloud on the phone app? Use the same bucket and key.
-2. In PaperView, open **Settings** (⚙ in the Library, or **Ctrl+,**).
-3. Under **Backblaze B2**, enter the **Key ID**, **Application key** and **bucket name**, then click **Save and connect**.
-4. A **Cloud** tab appears in your Library. Upload with ☁, from the right-click menu, or by dropping PDFs onto the Cloud tab.
+1. Open **Settings** (⚙ in the Library, or **Ctrl+,**).
+2. Under **Cloud**, click **Add account**, pick the type and fill in the details. For example:
+   - **SSH:** the host (an alias from `~/.ssh/config` works) and a folder, `PaperView` by default, which is made if it's missing. Set up key login first (`ssh-copy-id host`).
+   - **WebDAV:** the folder's full address, such as `https://nas.local:5006/PaperView` or `https://cloud.example.com/remote.php/dav/files/you/PaperView`, plus your user name and password. A NAS with a self-signed certificate needs **Trust a self-signed certificate**.
+   - **S3:** the endpoint (such as `https://<account>.r2.cloudflarestorage.com`), the region (`auto` for R2), the bucket and an access key.
+   - **Backblaze B2:** create a private bucket and an application key at [backblaze.com](https://www.backblaze.com/cloud-storage), then enter the Key ID, the application key and the bucket name.
+3. Click **Save and connect**. A **Cloud** tab appears in your Library. Upload with ☁, from the right-click menu, or by dropping documents onto the Cloud tab.
 
 </details>
 
@@ -139,8 +150,8 @@ Paper, Slate and Ink (as on the phone) plus a style for every main colour: Cherr
 ## Privacy
 
 - No ads, no analytics, no accounts.
-- Everything works offline. The internet is only used if you connect a cloud bucket, and then only to talk to your own bucket.
-- Your Backblaze details are stored only on your computer.
+- Everything works offline. The network is only used if you add a cloud account, and then only to talk to that account.
+- Passwords and keys are kept in your system keyring (KWallet, GNOME Keyring or the Windows Credential Manager), not in PaperView's settings. SSH accounts store no password at all.
 
 ## Credits
 

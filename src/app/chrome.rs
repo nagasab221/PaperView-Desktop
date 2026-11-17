@@ -28,7 +28,7 @@ impl ViewerApp {
     }
 
     pub(super) fn cloud_active(&self) -> bool {
-        self.cloud_enabled && self.cloud_cfg.ready()
+        self.cloud_enabled && self.current_account().is_some_and(|a| a.ready())
     }
 
     // ── full screen ──────────────────────────────────────────────────────────
@@ -684,7 +684,6 @@ impl ViewerApp {
 
     pub(super) fn open_settings(&mut self, ctx: &egui::Context) {
         self.home = HomeScreen::Settings;
-        self.b2_draft = self.cloud_cfg.clone();
         self.go_home(ctx);
     }
 

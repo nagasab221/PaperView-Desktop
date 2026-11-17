@@ -331,3 +331,36 @@ key presses, so copy listens for the event; the test driver does the same transl
 
 **Parked tabs** keep a scroll that hadn't happened yet (a restored session's tabs are
 parked before their first frame), so they reopen at their remembered page.
+
+## Cloud accounts (v0.6)
+
+**Shape.** `src/cloud/` holds one `Backend` trait (list, get, put, delete, rename, mkdir)
+and five implementations: `folder.rs`, `webdav.rs`, `s3.rs` (SigV4 signing, checked
+against AWS's published examples in its tests), `b2.rs` (native API, `.bzEmpty` folder
+markers) and `sftp.rs` (SFTP v3 over the system `ssh -s host sftp`, with reads and writes
+pipelined 64 × 32 KB, so `~/.ssh/config` and keys just work). `cloud::spawn` runs one op on
+a thread and reports `CloudEvent`s on the app's single channel; ops queue one at a time,
+each carrying the account it was started for. Paths are `/`-separated and relative to the
+account's top folder. Listings keep folders and documents (PDF + ebook extensions) and hide
+dotfiles.
+
+**Accounts** are stored as JSON under the eframe key `cloud_accounts` (plus `cloud_current`
+and `cloud_dir`). Secrets live in the keyring (`cloud/secrets.rs`: the `keyring` crate,
+Secret Service over zbus on Linux), are only touched from worker threads, and are cached for
+the session. If the keyring refuses one, the worker sends `SecretNotStored` and the app keeps
+it in `Account::plain_secret`. The old single-bucket keys (`b2_key_id`…) migrate to a B2
+account on first launch, and the loose downloads (and Recents pointing at them) move into
+`cloud/<account id>/`.
+
+**Downloads** go to `$XDG_DATA_HOME/paperview/cloud/<account id>/<path>`, through a hidden
+`.name.part` file. Folder accounts open files in place instead. `can_upload` refuses
+downloads and files already inside a Folder account.
+
+**Testing without the UI:** `examples/cloud_probe.rs` runs list → mkdir → upload → download
+(byte-compared) → rename → delete against any account given as JSON (`PROBE_ACCOUNT`,
+`PROBE_SECRET`); `PROBE_LIST=dir` only lists. `PAPERVIEW_NO_KEYRING=1` (debug builds) makes
+the keyring look absent. The UI's Cloud tab can be seeded through a scratch
+`$XDG_DATA_HOME/paperview/app.ron` with a `cloud_accounts` entry.
+
+**Android:** `docs/ANDROID_CLOUD_PORT.md` lists what the phone app needs to match.
+
